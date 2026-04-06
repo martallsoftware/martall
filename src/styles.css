@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Scrollbars */
+.dark ::-webkit-scrollbar { width: 8px; height: 8px; }
+.dark ::-webkit-scrollbar-track { background: #1e1e2e; }
+.dark ::-webkit-scrollbar-thumb { background: #3a3a5e; border-radius: 4px; }
+.dark ::-webkit-scrollbar-thumb:hover { background: #4a4a6e; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: #f0f0f4; }
+::-webkit-scrollbar-thumb { background: #c0c0d0; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #a0a0b0; }
+
+/* Prevent UI text selection */
+.select-none-ui {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Markdown rendered content */
+.markdown-body h1 { font-size: 2em; font-weight: 700; margin: 0.67em 0; border-bottom: 1px solid currentColor; padding-bottom: 0.3em; opacity: 0.8; }
+.markdown-body h2 { font-size: 1.5em; font-weight: 600; margin: 0.75em 0 0.5em; border-bottom: 1px solid currentColor; padding-bottom: 0.2em; opacity: 0.7; }
+.markdown-body h3 { font-size: 1.25em; font-weight: 600; margin: 0.75em 0 0.5em; }
+.markdown-body h4 { font-size: 1.1em; font-weight: 600; margin: 0.75em 0 0.5em; }
+.markdown-body p { margin: 0.5em 0; line-height: 1.7; }
+.markdown-body ul { list-style: disc; padding-left: 1.5em; margin: 0.5em 0; }
+.markdown-body ol { list-style: decimal; padding-left: 1.5em; margin: 0.5em 0; }
+.markdown-body li { margin: 0.25em 0; }
+.markdown-body code { background: rgba(128,128,128,0.15); padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.9em; font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace; }
+.markdown-body pre { background: rgba(0,0,0,0.15); padding: 1em; border-radius: 8px; overflow-x: auto; margin: 0.75em 0; }
+.markdown-body pre code { background: none; padding: 0; }
+.markdown-body blockquote { border-left: 3px solid #22C55E; padding-left: 1em; margin: 0.75em 0; opacity: 0.85; }
+.markdown-body a { color: #22C55E; text-decoration: underline; }
+.markdown-body table { border-collapse: collapse; margin: 0.75em 0; width: 100%; }
+.markdown-body th, .markdown-body td { border: 1px solid rgba(128,128,128,0.3); padding: 0.4em 0.8em; text-align: left; }
+.markdown-body th { font-weight: 600; }
+.markdown-body hr { border: none; border-top: 1px solid rgba(128,128,128,0.3); margin: 1.5em 0; }
+.markdown-body img { max-width: 100%; border-radius: 8px; }
+.markdown-body input[type="checkbox"] { margin-right: 0.4em; }
+
+/* Editor textarea */
+.editor-textarea {
+  font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+  font-size: 14px;
+  line-height: 1.7;
+  tab-size: 4;
+  resize: none;
+}
+
+/* Print styles: only show the preview pane */
+@media print {
+  aside, header, footer, .editor-textarea, .select-none-ui > div:first-child {
+    display: none !important;
+  }
+  .select-none-ui {
+    display: block !important;
+    background: white !important;
+    color: black !important;
+  }
+  .markdown-body {
+    color: black !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+  }
+  .markdown-body h1 { border-color: #ddd !important; }
+  .markdown-body h2 { border-color: #eee !important; }
+  .markdown-body code { background: #f4f4f4 !important; color: black !important; }
+  .markdown-body pre { background: #f4f4f4 !important; color: black !important; }
+  .markdown-body blockquote { border-color: #22C55E !important; color: #555 !important; }
+  .markdown-body th, .markdown-body td { border-color: #ddd !important; color: black !important; }
+  .markdown-body th { background: #f8f8f8 !important; }
+}
