@@ -5,6 +5,7 @@ import { useSettings, useTree, useNote, useNodeOps } from "./hooks/useTauri";
 import { useSearch, useTags } from "./hooks/useSearch";
 import TreeView from "./components/TreeView";
 import Editor, { type EditorHandle } from "./components/Editor";
+import DashboardView, { isDashboardNote } from "./components/DashboardView";
 import Preview from "./components/Preview";
 import SettingsModal from "./components/SettingsModal";
 import InputDialog from "./components/InputDialog";
@@ -20,7 +21,7 @@ import ImportDialog from "./components/ImportDialog";
 import VaultPicker from "./components/VaultPicker";
 import type { TreeNode } from "./types";
 
-type ViewMode = "edit" | "preview" | "split";
+type ViewMode = "edit" | "preview" | "split" | "dashboard";
 
 function countTree(nodes: TreeNode[]): { notes: number; folders: number } {
   let notes = 0;
@@ -51,6 +52,19 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("split");
+
+  const isDashboard = useMemo(
+    () => (note ? isDashboardNote(note.content) : false),
+    [note],
+  );
+
+  // Auto-switch to dashboard view when a dashboard note opens,
+  // and back to split when a non-dashboard note opens.
+  useEffect(() => {
+    if (isDashboard && viewMode !== "dashboard") setViewMode("dashboard");
+    if (!isDashboard && viewMode === "dashboard") setViewMode("split");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDashboard, note?.path]);
   const [isFavorite, setIsFavorite] = useState(false);
   const [favRefreshKey, setFavRefreshKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
@@ -640,7 +654,10 @@ ${previewEl.innerHTML}
           {/* View mode toggle */}
           {note && activePanel !== "graph" && (
             <div className="flex rounded-lg border border-gray-300 dark:border-gray-600 overflow-hidden">
-              {(["edit", "split", "preview"] as ViewMode[]).map((mode) => (
+              {((isDashboard
+                ? (["edit", "split", "preview", "dashboard"] as ViewMode[])
+                : (["edit", "split", "preview"] as ViewMode[])
+              )).map((mode) => (
                 <button
                   key={mode}
                   onClick={() => setViewMode(mode)}
@@ -654,7 +671,9 @@ ${previewEl.innerHTML}
                     ? "Edit"
                     : mode === "preview"
                       ? "Preview"
-                      : "Split"}
+                      : mode === "dashboard"
+                        ? "Dashboard"
+                        : "Split"}
                 </button>
               ))}
             </div>
@@ -678,6 +697,12 @@ ${previewEl.innerHTML}
               handleSelectNote(path);
               setActivePanel("notes");
             }} darkMode={settings.dark_theme} />
+          ) : note && viewMode === "dashboard" ? (
+            <DashboardView
+              content={note.content}
+              notePath={note.path}
+              darkMode={settings.dark_theme}
+            />
           ) : note ? (
             <div ref={splitContainerRef} className="flex h-full">
               {/* Editor pane */}

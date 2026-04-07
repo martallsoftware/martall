@@ -5,6 +5,7 @@ import ChartView, { tryParseChart } from "./ChartView";
 interface Props {
   code: string;
   notePath: string | null;
+  showHeader?: boolean;
 }
 
 // Module-level cache so re-renders (debounced edits, view-mode toggles,
@@ -29,7 +30,7 @@ function parseRefreshInterval(code: string): number | null {
   return ms < 1000 ? 1000 : ms;
 }
 
-export default function LuaLiveBlock({ code, notePath }: Props) {
+export default function LuaLiveBlock({ code, notePath, showHeader = true }: Props) {
   const cacheKey = `${notePath ?? ""}::${hashCode(code)}`;
   const cached = resultCache.get(cacheKey);
 
@@ -144,30 +145,38 @@ export default function LuaLiveBlock({ code, notePath }: Props) {
     : "never";
 
   return (
-    <div className="my-3 border border-gray-200 dark:border-gray-700/50 rounded overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-1 text-xs bg-gray-100 dark:bg-gray-800/50">
-        <span className="text-gray-500">
-          lua-live · {running ? "running…" : ranAgo}
-          {refreshMs ? ` · auto every ${Math.round(refreshMs / 1000)}s` : ""}
-        </span>
-        <div className="flex gap-2">
-          <button
-            onClick={run}
-            disabled={running}
-            className="text-gray-500 hover:text-accent"
-            title="Re-run script now"
-          >
-            ⟳
-          </button>
-          <button
-            onClick={() => setShowSource((s) => !s)}
-            className="text-gray-500 hover:text-accent"
-            title="Toggle source"
-          >
-            {"</>"}
-          </button>
+    <div
+      className={
+        showHeader
+          ? "my-3 border border-gray-200 dark:border-gray-700/50 rounded overflow-hidden"
+          : ""
+      }
+    >
+      {showHeader && (
+        <div className="flex items-center justify-between px-3 py-1 text-xs bg-gray-100 dark:bg-gray-800/50">
+          <span className="text-gray-500">
+            lua-live · {running ? "running…" : ranAgo}
+            {refreshMs ? ` · auto every ${Math.round(refreshMs / 1000)}s` : ""}
+          </span>
+          <div className="flex gap-2">
+            <button
+              onClick={run}
+              disabled={running}
+              className="text-gray-500 hover:text-accent"
+              title="Re-run script now"
+            >
+              ⟳
+            </button>
+            <button
+              onClick={() => setShowSource((s) => !s)}
+              className="text-gray-500 hover:text-accent"
+              title="Toggle source"
+            >
+              {"</>"}
+            </button>
+          </div>
         </div>
-      </div>
+      )}
       {showSource && (
         <pre className="text-xs overflow-auto p-2 bg-black/5 dark:bg-white/5 m-0">
           {code}
