@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useSettings, useTree, useNote, useNodeOps } from "./hooks/useTauri";
 import { useSearch, useTags } from "./hooks/useSearch";
 import TreeView from "./components/TreeView";
-import Editor from "./components/Editor";
+import Editor, { type EditorHandle } from "./components/Editor";
 import Preview from "./components/Preview";
 import SettingsModal from "./components/SettingsModal";
 import InputDialog from "./components/InputDialog";
@@ -53,6 +53,50 @@ export default function App() {
   const [viewMode, setViewMode] = useState<ViewMode>("split");
   const [isFavorite, setIsFavorite] = useState(false);
   const [favRefreshKey, setFavRefreshKey] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [splitRatio, setSplitRatio] = useState(0.5);
+  const splitContainerRef = useRef<HTMLDivElement>(null);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+
+  // Hydrate split ratio from settings once loaded
+  useEffect(() => {
+    if (loaded && typeof settings.split_ratio === "number") {
+      setSplitRatio(settings.split_ratio);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded]);
+
+  const persistSplitRatio = useCallback(
+    (ratio: number) => {
+      updateSettings({ ...settingsRef.current, split_ratio: ratio });
+    },
+    [updateSettings],
+  );
+
+  const startSplitDrag = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    let lastRatio = splitRatio;
+    const onMove = (ev: MouseEvent) => {
+      const el = splitContainerRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const ratio = (ev.clientX - rect.left) / rect.width;
+      lastRatio = Math.min(0.85, Math.max(0.15, ratio));
+      setSplitRatio(lastRatio);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      persistSplitRatio(lastRatio);
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [splitRatio, persistSplitRatio]);
   const [activePanel, setActivePanel] = useState<SidebarPanel>("notes");
   const [inputDialog, setInputDialog] = useState<{
     title: string;
@@ -67,6 +111,7 @@ export default function App() {
   showImportRef.current = showImport;
   // Callback ref: when import dialog is open, it registers here to receive dropped files
   const importDropCallback = useRef<((files: string[]) => void) | null>(null);
+  const editorRef = useRef<EditorHandle>(null);
 
   const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".ico"];
 
@@ -119,7 +164,11 @@ export default function App() {
               notePath: noteRef.current.path,
             });
             const markdown = `\n![](${relativePath})\n`;
-            updateContent(noteRef.current.content + markdown);
+            if (editorRef.current) {
+              editorRef.current.insertAtCursor(markdown);
+            } else {
+              updateContent(noteRef.current.content + markdown);
+            }
           } catch (err) {
             console.error("Failed to copy image:", err);
           }
@@ -541,6 +590,46 @@ ${previewEl.innerHTML}
 
           <div className="flex-1" />
 
+          {/* Refresh data button */}
+          <button
+            onClick={async () => {
+              if (refreshing) return;
+              setRefreshing(true);
+              try {
+                await invoke("rebuild_index");
+                await refreshTree();
+                await refreshTags();
+                setFavRefreshKey((k) => k + 1);
+                if (noteRef.current) {
+                  await openNote(noteRef.current.path);
+                }
+              } catch (err) {
+                console.error("Refresh failed:", err);
+              } finally {
+                setRefreshing(false);
+              }
+            }}
+            className="p-1.5 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors text-gray-500 dark:text-gray-400"
+            title="Refresh — reload files and index from disk"
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 20 20"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className={refreshing ? "animate-spin" : ""}
+            >
+              <path d="M3 10a7 7 0 0 1 12-4.9L17 7" />
+              <path d="M17 3v4h-4" />
+              <path d="M17 10a7 7 0 0 1-12 4.9L3 13" />
+              <path d="M3 17v-4h4" />
+            </svg>
+          </button>
+
           {/* Saving indicator */}
           {saving && (
             <span className="text-xs text-gray-400 animate-pulse">
@@ -590,17 +679,15 @@ ${previewEl.innerHTML}
               setActivePanel("notes");
             }} darkMode={settings.dark_theme} />
           ) : note ? (
-            <div className="flex h-full">
+            <div ref={splitContainerRef} className="flex h-full">
               {/* Editor pane */}
               {(viewMode === "edit" || viewMode === "split") && (
                 <div
-                  className={`h-full overflow-auto ${
-                    viewMode === "split"
-                      ? "w-1/2 border-r border-gray-200 dark:border-gray-700/50"
-                      : "w-full"
-                  }`}
+                  className="h-full overflow-auto"
+                  style={{ width: viewMode === "split" ? `${splitRatio * 100}%` : "100%" }}
                 >
                   <Editor
+                    ref={editorRef}
                     content={note.content}
                     onChange={updateContent}
                     notePath={note.path}
@@ -608,12 +695,21 @@ ${previewEl.innerHTML}
                 </div>
               )}
 
+              {/* Draggable splitter */}
+              {viewMode === "split" && (
+                <div
+                  onMouseDown={startSplitDrag}
+                  onDoubleClick={() => { setSplitRatio(0.5); persistSplitRatio(0.5); }}
+                  title="Drag to resize — double-click to reset"
+                  className="w-1 cursor-col-resize bg-gray-200 dark:bg-gray-700/50 hover:bg-accent/60 transition-colors flex-shrink-0"
+                />
+              )}
+
               {/* Preview pane */}
               {(viewMode === "preview" || viewMode === "split") && (
                 <div
-                  className={`h-full overflow-auto ${
-                    viewMode === "split" ? "w-1/2" : "w-full"
-                  }`}
+                  className="h-full overflow-auto"
+                  style={{ width: viewMode === "split" ? `${(1 - splitRatio) * 100}%` : "100%" }}
                 >
                   <Preview content={note.content} notePath={note.path} darkMode={settings.dark_theme} />
                 </div>

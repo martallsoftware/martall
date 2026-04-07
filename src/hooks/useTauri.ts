@@ -7,6 +7,8 @@ export function useSettings() {
     notes_directory: "",
     dark_theme: true,
     vaults: [],
+    split_ratio: 0.5,
+    trusted_scripts: [],
   });
   const [loaded, setLoaded] = useState(false);
 

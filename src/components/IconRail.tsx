@@ -96,8 +96,17 @@ export default function IconRail({ active, onSelect, onSettings }: Props) {
   return (
     <div className="flex flex-col items-center w-12 flex-shrink-0 border-r border-gray-200 dark:border-gray-700/50 bg-gray-100 dark:bg-[#16162a] py-2">
       {/* Logo */}
-      <div className="mb-3 text-accent font-bold text-base select-none" title="Martall">
-        M
+      <div className="mb-3 text-accent" title="Martall">
+        <svg width="26" height="26" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+          {/* foliage clusters */}
+          <circle cx="11" cy="9" r="4.2" fill="currentColor" fillOpacity="0.25" />
+          <circle cx="17" cy="7.5" r="3.4" fill="currentColor" fillOpacity="0.25" />
+          <circle cx="21" cy="11" r="3" fill="currentColor" fillOpacity="0.25" />
+          {/* trunk */}
+          <path d="M16 26c0-4 -3-6 -5-8c2 0 3 1 5 1c0-3 1-5 3-7" />
+          {/* pot */}
+          <path d="M10 26h12l-1.5 3h-9z" fill="currentColor" fillOpacity="0.2" />
+        </svg>
       </div>
 
       {/* Nav items */}

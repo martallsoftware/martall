@@ -1,5 +1,6 @@
 import type { TagInfo, Vault } from "../types";
 import type { SidebarPanel } from "./IconRail";
+import pkg from "../../package.json";
 
 interface Props {
   noteCount: number;
@@ -28,7 +29,10 @@ export default function HomePanel({
     <div className="flex-1 overflow-y-auto p-4">
       {/* Welcome */}
       <div className="mb-5">
-        <h2 className="text-lg font-bold text-accent mb-1">Martall</h2>
+        <div className="flex items-baseline gap-2">
+          <h2 className="text-lg font-bold text-accent">Martall</h2>
+          <span className="text-[10px] text-gray-400">v{pkg.version}</span>
+        </div>
         <p className="text-xs text-gray-400">Your notes, organized.</p>
       </div>
 

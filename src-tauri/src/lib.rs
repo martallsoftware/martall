@@ -1,4 +1,5 @@
 mod database;
+mod lua_runtime;
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -23,6 +24,14 @@ pub struct Settings {
     pub dark_theme: bool,
     #[serde(default)]
     pub vaults: Vec<Vault>,
+    #[serde(default = "default_split_ratio")]
+    pub split_ratio: f32,
+    #[serde(default)]
+    pub trusted_scripts: Vec<String>,
+}
+
+fn default_split_ratio() -> f32 {
+    0.5
 }
 
 impl Default for Settings {
@@ -36,6 +45,8 @@ impl Default for Settings {
                 name: "Default".to_string(),
                 path: default_path,
             }],
+            split_ratio: 0.5,
+            trusted_scripts: Vec::new(),
         }
     }
 }
@@ -793,6 +804,49 @@ fn get_favorite_notes(state: State<'_, AppState>) -> Result<Vec<database::NoteIn
 }
 
 // ---------------------------------------------------------------------------
+// Lua scripting (lua-live blocks)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn run_lua_script(
+    state: State<'_, AppState>,
+    note_path: String,
+    code: String,
+) -> Result<String, String> {
+    let trusted = {
+        let s = state.settings.lock().unwrap();
+        s.trusted_scripts.iter().any(|p| p == &note_path)
+    };
+    if !trusted {
+        return Err("Note is not trusted for script execution".into());
+    }
+    lua_runtime::run_script(&code)
+}
+
+#[tauri::command]
+fn set_note_trusted(
+    state: State<'_, AppState>,
+    note_path: String,
+    trusted: bool,
+) -> Result<bool, String> {
+    let mut s = state.settings.lock().unwrap();
+    let exists = s.trusted_scripts.iter().any(|p| p == &note_path);
+    if trusted && !exists {
+        s.trusted_scripts.push(note_path);
+    } else if !trusted && exists {
+        s.trusted_scripts.retain(|p| p != &note_path);
+    }
+    save_settings_to_disk(&s);
+    Ok(trusted)
+}
+
+#[tauri::command]
+fn is_note_trusted(state: State<'_, AppState>, note_path: String) -> Result<bool, String> {
+    let s = state.settings.lock().unwrap();
+    Ok(s.trusted_scripts.iter().any(|p| p == &note_path))
+}
+
+// ---------------------------------------------------------------------------
 // Import
 // ---------------------------------------------------------------------------
 
@@ -973,6 +1027,9 @@ pub fn run() {
             add_vault,
             remove_vault,
             switch_vault,
+            run_lua_script,
+            set_note_trusted,
+            is_note_trusted,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

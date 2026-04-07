@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import MermaidBlock from "./MermaidBlock";
+import LuaLiveBlock from "./LuaLiveBlock";
 
 interface Props {
   content: string;
@@ -228,10 +229,14 @@ export default function Preview({ content, notePath, darkMode = true }: Props) {
           remarkPlugins={[remarkGfm]}
           components={{
             code: ({ className, children, ...props }) => {
-              const match = /language-mermaid/.exec(className || "");
-              if (match) {
+              const cls = className || "";
+              if (/language-mermaid/.test(cls)) {
                 const chart = String(children).replace(/\n$/, "");
                 return <MermaidBlock chart={chart} dark={darkMode} />;
+              }
+              if (/language-lua-live/.test(cls)) {
+                const code = String(children).replace(/\n$/, "");
+                return <LuaLiveBlock code={code} notePath={notePath} />;
               }
               return (
                 <code className={className} {...props}>
@@ -247,7 +252,8 @@ export default function Preview({ content, notePath, darkMode = true }: Props) {
                 "props" in children
               ) {
                 const props = (children as React.ReactElement).props as Record<string, unknown>;
-                if (/language-mermaid/.test(String(props?.className || ""))) {
+                const cls = String(props?.className || "");
+                if (/language-mermaid/.test(cls) || /language-lua-live/.test(cls)) {
                   return <>{children}</>;
                 }
               }

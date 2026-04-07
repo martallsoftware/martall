@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { forwardRef, useCallback, useImperativeHandle, useRef, useState } from "react";
 import EmojiPicker from "./EmojiPicker";
 import TableDialog from "./TableDialog";
 import FlowchartDialog from "./FlowchartDialog";
@@ -10,7 +10,11 @@ interface Props {
   notePath: string | null;
 }
 
-export default function Editor({ content, onChange, notePath }: Props) {
+export interface EditorHandle {
+  insertAtCursor: (text: string) => void;
+}
+
+function EditorImpl({ content, onChange, notePath }: Props, ref: React.Ref<EditorHandle>) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const contentRef = useRef(content);
   contentRef.current = content;
@@ -47,6 +51,8 @@ export default function Editor({ content, onChange, notePath }: Props) {
     },
     [onChange],
   );
+
+  useImperativeHandle(ref, () => ({ insertAtCursor }), [insertAtCursor]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -177,3 +183,6 @@ export default function Editor({ content, onChange, notePath }: Props) {
     </div>
   );
 }
+
+const Editor = forwardRef<EditorHandle, Props>(EditorImpl);
+export default Editor;

@@ -19,6 +19,8 @@ export interface Settings {
   notes_directory: string;
   dark_theme: boolean;
   vaults: Vault[];
+  split_ratio: number;
+  trusted_scripts: string[];
 }
 
 export interface SearchResult {
