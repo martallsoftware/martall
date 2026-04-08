@@ -392,6 +392,22 @@ export default function TreeView({
       className="flex-1 overflow-y-auto py-1"
       onContextMenu={handleRootContextMenu}
     >
+      {nodes.length > 0 && (
+        <div className="flex items-center justify-end px-2 pb-1">
+          <button
+            onClick={() => setExpandedPaths(new Set())}
+            disabled={expandedPaths.size === 0}
+            className="flex items-center gap-1 px-2 py-0.5 text-[10px] uppercase tracking-wider text-gray-400 hover:text-accent disabled:opacity-30 disabled:hover:text-gray-400 transition-colors"
+            title="Collapse all folders"
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M4 6l4-3 4 3" />
+              <path d="M4 10l4 3 4-3" />
+            </svg>
+            Collapse all
+          </button>
+        </div>
+      )}
       {nodes.length === 0 && (
         <div className="px-4 py-8 text-center text-xs text-gray-400">
           No notes yet.
