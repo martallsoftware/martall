@@ -748,6 +748,16 @@ fn rebuild_index(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Incremental sync — only re-indexes files whose mtime changed since the
+/// last scan. Cheap; safe to call on every window focus.
+#[tauri::command]
+fn sync_index(state: State<'_, AppState>) -> Result<(), String> {
+    let settings = state.settings.lock().unwrap();
+    let db = state.db.lock().unwrap();
+    database::sync_index(&db, &settings.notes_directory);
+    Ok(())
+}
+
 #[tauri::command]
 fn get_recent_notes(state: State<'_, AppState>, limit: Option<i64>) -> Result<Vec<database::NoteInfo>, String> {
     let settings = state.settings.lock().unwrap();
@@ -776,6 +786,36 @@ fn get_tag_graph(state: State<'_, AppState>) -> Result<database::TagGraph, Strin
     let settings = state.settings.lock().unwrap();
     let db = state.db.lock().unwrap();
     Ok(database::get_tag_graph(&db, &settings.notes_directory))
+}
+
+// ---------------------------------------------------------------------------
+// Wiki links / backlinks
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn resolve_wiki_links(
+    state: State<'_, AppState>,
+    targets: Vec<String>,
+    from_path: Option<String>,
+) -> Result<std::collections::HashMap<String, Option<String>>, String> {
+    let settings = state.settings.lock().unwrap();
+    let db = state.db.lock().unwrap();
+    Ok(database::resolve_wiki_links(
+        &db,
+        &settings.notes_directory,
+        targets,
+        from_path.as_deref(),
+    ))
+}
+
+#[tauri::command]
+fn get_backlinks(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<Vec<database::NoteInfo>, String> {
+    let settings = state.settings.lock().unwrap();
+    let db = state.db.lock().unwrap();
+    Ok(database::get_backlinks(&db, &settings.notes_directory, &path))
 }
 
 // ---------------------------------------------------------------------------
@@ -1016,9 +1056,12 @@ pub fn run() {
             get_notes_by_tag,
             get_note_tags,
             rebuild_index,
+            sync_index,
             get_recent_notes,
             get_all_notes_sorted,
             get_tag_graph,
+            resolve_wiki_links,
+            get_backlinks,
             is_favorite,
             toggle_favorite,
             get_favorite_notes,

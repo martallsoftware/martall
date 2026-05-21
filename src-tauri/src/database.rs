@@ -95,6 +95,15 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             PRIMARY KEY (note_id, tag_id)
         );
 
+        CREATE TABLE IF NOT EXISTS note_links (
+            source_note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+            target         TEXT NOT NULL,
+            PRIMARY KEY (source_note_id, target)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_note_links_target ON note_links(target);
+        CREATE INDEX IF NOT EXISTS idx_note_links_target_lower ON note_links(LOWER(target));
+
         CREATE TABLE IF NOT EXISTS favorites (
             rel_path TEXT NOT NULL UNIQUE,
             added_at INTEGER NOT NULL DEFAULT 0
@@ -137,6 +146,37 @@ fn migrate(conn: &Connection) {
             now, now
         ));
     }
+
+    // Repair `updated_at` / `created_at` rows written by an earlier version
+    // that used wall-clock now() instead of the file's mtime. Idempotent: on
+    // subsequent runs nothing matches the WHERE clauses.
+    let _ = conn.execute(
+        "UPDATE notes SET updated_at = modified_at WHERE updated_at <> modified_at AND modified_at > 0",
+        [],
+    );
+    let _ = conn.execute(
+        "UPDATE notes SET created_at = modified_at WHERE created_at > modified_at AND modified_at > 0",
+        [],
+    );
+
+    // First run after wiki-link feature lands: if any indexed note contains
+    // `[[…]]` syntax but the links table is empty, force a re-sync so existing
+    // notes get their links extracted. Once indexed, this becomes a no-op.
+    let links_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM note_links", [], |r| r.get(0))
+        .unwrap_or(0);
+    if links_count == 0 {
+        let has_wiki_syntax: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM notes WHERE content LIKE '%[[%' LIMIT 1)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if has_wiki_syntax {
+            let _ = conn.execute("UPDATE notes SET modified_at = 0", []);
+        }
+    }
 }
 
 /// Extract #tags from markdown content, ignoring code blocks
@@ -177,6 +217,33 @@ pub fn extract_tags(content: &str) -> Vec<String> {
     tags.sort();
     tags.dedup();
     tags
+}
+
+/// Extract `[[wiki link]]` targets from markdown content, ignoring code blocks.
+/// `[[Target|Display]]` returns just `Target`.
+pub fn extract_wiki_links(content: &str) -> Vec<String> {
+    let code_block_re = Regex::new(r"```[\s\S]*?```").unwrap();
+    let stripped = code_block_re.replace_all(content, "");
+    let inline_code_re = Regex::new(r"`[^`]+`").unwrap();
+    let stripped = inline_code_re.replace_all(&stripped, "");
+
+    let wiki_re = Regex::new(r"\[\[([^\]\n]+?)\]\]").unwrap();
+    let mut out: Vec<String> = Vec::new();
+    for cap in wiki_re.captures_iter(&stripped) {
+        if let Some(m) = cap.get(1) {
+            let raw = m.as_str();
+            let target = match raw.find('|') {
+                Some(i) => raw[..i].trim().to_string(),
+                None => raw.trim().to_string(),
+            };
+            if !target.is_empty() {
+                out.push(target);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Get file modification time as unix timestamp
@@ -260,13 +327,18 @@ pub fn sync_index(conn: &Connection, notes_dir: &str) {
     cleanup_orphan_tags(conn);
 }
 
-/// Insert or update a note in the index
+/// Insert or update a note in the index.
+///
+/// `updated_at` and `created_at` are derived from the file's `mtime` rather
+/// than wall-clock time, so:
+///   - Cross-device sync (e.g. iCloud) produces the same values everywhere.
+///   - Re-indexing (focus handler, `rebuild_index`) doesn't destroy ordering.
+///   - Sort-by-updated reflects real file edits, not indexer activity.
 pub fn upsert_note(conn: &Connection, rp: &str, title: &str, content: &str, mtime: i64) {
-    let now = now_unix();
     let _ = conn.execute(
         "INSERT INTO notes (rel_path, title, content, modified_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(rel_path) DO UPDATE SET title=excluded.title, content=excluded.content, modified_at=excluded.modified_at, updated_at=?",
-        params![rp, title, content, mtime, now, now, now],
+         ON CONFLICT(rel_path) DO UPDATE SET title=excluded.title, content=excluded.content, modified_at=excluded.modified_at, updated_at=excluded.modified_at",
+        params![rp, title, content, mtime, mtime, mtime],
     );
 
     // Get note id
@@ -276,6 +348,19 @@ pub fn upsert_note(conn: &Connection, rp: &str, title: &str, content: &str, mtim
         |row| row.get::<_, i64>(0),
     ) {
         sync_note_tags(conn, note_id, content);
+        sync_note_links(conn, note_id, content);
+    }
+}
+
+/// Sync wiki link targets for a specific note
+fn sync_note_links(conn: &Connection, note_id: i64, content: &str) {
+    let links = extract_wiki_links(content);
+    let _ = conn.execute("DELETE FROM note_links WHERE source_note_id = ?", params![note_id]);
+    for target in &links {
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO note_links (source_note_id, target) VALUES (?, ?)",
+            params![note_id, target],
+        );
     }
 }
 
@@ -656,6 +741,138 @@ pub fn get_tag_graph(conn: &Connection, notes_dir: &str) -> TagGraph {
     }
 
     TagGraph { tags, notes, edges }
+}
+
+// MARK: - Wiki Links
+
+/// Resolve a single wiki-link target to a relative path within the vault.
+/// Resolution order:
+///   1. If target contains a slash, try exact rel_path match (with/without .md).
+///   2. Otherwise, match by title (case-insensitive). If multiple notes share
+///      the title, prefer one in the same folder as `from_rel`, else the first.
+fn resolve_target(
+    conn: &Connection,
+    target: &str,
+    from_rel: Option<&str>,
+) -> Option<String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return None;
+    }
+
+    if target.contains('/') || target.contains('\\') {
+        let candidates: Vec<String> = if target.ends_with(".md") {
+            vec![target.to_string()]
+        } else {
+            vec![format!("{}.md", target), target.to_string()]
+        };
+        for c in &candidates {
+            if let Ok(rp) = conn.query_row(
+                "SELECT rel_path FROM notes WHERE rel_path = ? LIMIT 1",
+                params![c],
+                |row| row.get::<_, String>(0),
+            ) {
+                return Some(rp);
+            }
+        }
+        return None;
+    }
+
+    let mut stmt = conn
+        .prepare("SELECT rel_path FROM notes WHERE LOWER(title) = LOWER(?)")
+        .ok()?;
+    let matches: Vec<String> = stmt
+        .query_map(params![target], |row| row.get::<_, String>(0))
+        .ok()?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if matches.is_empty() {
+        return None;
+    }
+    if matches.len() == 1 {
+        return Some(matches.into_iter().next().unwrap());
+    }
+    if let Some(from) = from_rel {
+        let from_dir = Path::new(from)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        for m in &matches {
+            let m_dir = Path::new(m)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if m_dir == from_dir {
+                return Some(m.clone());
+            }
+        }
+    }
+    Some(matches.into_iter().next().unwrap())
+}
+
+/// Batch-resolve wiki link targets. Returns `target -> absolute path | null`.
+pub fn resolve_wiki_links(
+    conn: &Connection,
+    notes_dir: &str,
+    targets: Vec<String>,
+    from_path: Option<&str>,
+) -> HashMap<String, Option<String>> {
+    let root = Path::new(notes_dir);
+    let from_rel = from_path
+        .and_then(|p| Path::new(p).strip_prefix(root).ok())
+        .map(|p| p.to_string_lossy().to_string());
+
+    let mut map = HashMap::new();
+    for target in targets {
+        let resolved = resolve_target(conn, &target, from_rel.as_deref())
+            .map(|rp| root.join(&rp).to_string_lossy().to_string());
+        map.insert(target, resolved);
+    }
+    map
+}
+
+/// Return all notes that link TO the note at `note_path` via `[[wiki link]]`.
+pub fn get_backlinks(conn: &Connection, notes_dir: &str, note_path: &str) -> Vec<NoteInfo> {
+    let root = Path::new(notes_dir);
+    let rp = match Path::new(note_path).strip_prefix(root) {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => return Vec::new(),
+    };
+    let title = Path::new(&rp)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let rp_without_ext = rp.trim_end_matches(".md").to_string();
+
+    let mut stmt = match conn.prepare(
+        "SELECT DISTINCT n.rel_path, n.title, n.created_at, n.updated_at
+         FROM note_links nl
+         JOIN notes n ON n.id = nl.source_note_id
+         WHERE nl.target = ?
+            OR nl.target = ?
+            OR LOWER(nl.target) = LOWER(?)
+         ORDER BY n.updated_at DESC",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    stmt.query_map(
+        params![&rp, &rp_without_ext, &title],
+        |row| {
+            let source_rp: String = row.get(0)?;
+            let full_path = root.join(&source_rp).to_string_lossy().to_string();
+            Ok(NoteInfo {
+                path: full_path,
+                title: row.get(1)?,
+                created_at: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        },
+    )
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
 }
 
 /// Get tags for a specific note

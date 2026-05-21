@@ -5,11 +5,87 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import MermaidBlock from "./MermaidBlock";
 import LuaLiveBlock from "./LuaLiveBlock";
+import ContextMenu, { type MenuItem } from "./ContextMenu";
+import type { NoteInfo } from "../types";
 
 interface Props {
   content: string;
   notePath: string | null;
   darkMode?: boolean;
+  onOpenNote?: (path: string) => void;
+}
+
+/**
+ * Remark plugin: rewrites `[[Target]]` and `[[Target|Display]]` text spans
+ * into link nodes with `url = "wiki:<target>"`. The `a` component handler
+ * below detects the `wiki:` prefix and routes the click through `onOpenNote`.
+ * Nodes without `children` (code, inlineCode) are untouched.
+ */
+const WIKI_LINK_RE = /\[\[([^\]\n]+?)\]\]/g;
+function remarkWikiLinks() {
+  const visit = (node: { type?: string; children?: unknown[] }) => {
+    if (!node || typeof node !== "object") return;
+    if (node.type === "link") return;
+    if (!Array.isArray(node.children)) return;
+
+    const out: unknown[] = [];
+    for (const child of node.children) {
+      const c = child as { type?: string; value?: string };
+      if (c.type === "text" && typeof c.value === "string" && c.value.includes("[[")) {
+        const text = c.value;
+        let last = 0;
+        let matched = false;
+        WIKI_LINK_RE.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = WIKI_LINK_RE.exec(text)) !== null) {
+          matched = true;
+          if (m.index > last) {
+            out.push({ type: "text", value: text.slice(last, m.index) });
+          }
+          const raw = m[1];
+          const pipe = raw.indexOf("|");
+          const target = (pipe >= 0 ? raw.slice(0, pipe) : raw).trim();
+          const display = (pipe >= 0 ? raw.slice(pipe + 1) : raw).trim();
+          out.push({
+            type: "link",
+            url: "wiki:" + target,
+            title: null,
+            children: [{ type: "text", value: display }],
+          });
+          last = WIKI_LINK_RE.lastIndex;
+        }
+        if (matched) {
+          if (last < text.length) {
+            out.push({ type: "text", value: text.slice(last) });
+          }
+        } else {
+          out.push(child);
+        }
+      } else {
+        out.push(child);
+        visit(c as { type?: string; children?: unknown[] });
+      }
+    }
+    node.children = out;
+  };
+  return (tree: { type?: string; children?: unknown[] }) => visit(tree);
+}
+
+/** Extract all unique `[[…]]` targets from raw markdown, ignoring code blocks. */
+function extractWikiTargets(md: string): string[] {
+  const stripped = md
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/`[^`]+`/g, "");
+  const set = new Set<string>();
+  const re = /\[\[([^\]\n]+?)\]\]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(stripped)) !== null) {
+    const raw = m[1];
+    const pipe = raw.indexOf("|");
+    const target = (pipe >= 0 ? raw.slice(0, pipe) : raw).trim();
+    if (target) set.add(target);
+  }
+  return Array.from(set);
 }
 
 // Global cache so images survive re-renders and re-mounts
@@ -199,7 +275,7 @@ function renderWithTags(children: React.ReactNode): React.ReactNode {
   return children;
 }
 
-export default function Preview({ content, notePath, darkMode = true }: Props) {
+export default function Preview({ content, notePath, darkMode = true, onOpenNote }: Props) {
   const noteDir = useMemo(() => {
     if (!notePath) return null;
     const lastSlash = Math.max(notePath.lastIndexOf("/"), notePath.lastIndexOf("\\"));
@@ -211,6 +287,62 @@ export default function Preview({ content, notePath, darkMode = true }: Props) {
   // Debounce preview updates to avoid re-rendering on every keystroke
   const [debouncedContent, setDebouncedContent] = useState(processedContent);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; hasSelection: boolean } | null>(null);
+
+  const copyText = async (text: string) => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Fallback for environments without clipboard API
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+  };
+
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const selection = window.getSelection()?.toString() ?? "";
+    setMenu({ x: e.clientX, y: e.clientY, hasSelection: selection.length > 0 });
+  };
+
+  const menuItems = useMemo<MenuItem[]>(() => {
+    if (!menu) return [];
+    const items: MenuItem[] = [];
+    if (menu.hasSelection) {
+      items.push({
+        label: "Copy selection",
+        onClick: () => copyText(window.getSelection()?.toString() ?? ""),
+      });
+    }
+    items.push({
+      label: "Select all",
+      onClick: () => {
+        if (!contentRef.current) return;
+        const range = document.createRange();
+        range.selectNodeContents(contentRef.current);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+      },
+    });
+    items.push({
+      label: "Copy all (rendered)",
+      onClick: () => copyText(contentRef.current?.innerText ?? ""),
+    });
+    items.push({
+      label: "Copy all (markdown)",
+      onClick: () => copyText(content),
+    });
+    return items;
+  }, [menu, content]);
 
   useEffect(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
@@ -222,11 +354,57 @@ export default function Preview({ content, notePath, darkMode = true }: Props) {
     };
   }, [processedContent]);
 
+  // Extract wiki targets from the (debounced) content and batch-resolve them
+  // to absolute paths so the renderer can mark broken links and route clicks.
+  const wikiTargets = useMemo(() => extractWikiTargets(debouncedContent), [debouncedContent]);
+  const [wikiResolved, setWikiResolved] = useState<Record<string, string | null>>({});
+
+  useEffect(() => {
+    if (wikiTargets.length === 0) {
+      setWikiResolved({});
+      return;
+    }
+    let cancelled = false;
+    invoke<Record<string, string | null>>("resolve_wiki_links", {
+      targets: wikiTargets,
+      fromPath: notePath,
+    })
+      .then((r) => {
+        if (!cancelled) setWikiResolved(r);
+      })
+      .catch(() => {
+        if (!cancelled) setWikiResolved({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [wikiTargets, notePath]);
+
+  // Backlinks: notes that reference this note via `[[…]]`.
+  const [backlinks, setBacklinks] = useState<NoteInfo[]>([]);
+  useEffect(() => {
+    if (!notePath) {
+      setBacklinks([]);
+      return;
+    }
+    let cancelled = false;
+    invoke<NoteInfo[]>("get_backlinks", { path: notePath })
+      .then((r) => {
+        if (!cancelled) setBacklinks(r);
+      })
+      .catch(() => {
+        if (!cancelled) setBacklinks([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [notePath]);
+
   return (
-    <div className="h-full overflow-auto p-5">
-      <div className="markdown-body text-gray-800 dark:text-gray-200 max-w-none">
+    <div className="h-full overflow-auto p-5" onContextMenu={handleContextMenu}>
+      <div ref={contentRef} className="markdown-body text-gray-800 dark:text-gray-200 max-w-none">
         <Markdown
-          remarkPlugins={[remarkGfm]}
+          remarkPlugins={[remarkGfm, remarkWikiLinks]}
           components={{
             code: ({ className, children, ...props }) => {
               const cls = className || "";
@@ -259,18 +437,41 @@ export default function Preview({ content, notePath, darkMode = true }: Props) {
               }
               return <pre>{children}</pre>;
             },
-            a: ({ href, children }) => (
-              <a
-                href={href}
-                onClick={(e) => {
-                  e.preventDefault();
-                  if (href) openUrl(href);
-                }}
-                style={{ cursor: "pointer" }}
-              >
-                {children}
-              </a>
-            ),
+            a: ({ href, children }) => {
+              if (href && href.startsWith("wiki:")) {
+                const target = href.slice(5);
+                const resolved = wikiResolved[target];
+                const broken = resolved === null;
+                return (
+                  <a
+                    href="#"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      if (typeof resolved === "string" && onOpenNote) {
+                        onOpenNote(resolved);
+                      }
+                    }}
+                    className={broken ? "wiki-link wiki-link-broken" : "wiki-link"}
+                    title={broken ? `Note not found: ${target}` : target}
+                    style={{ cursor: broken ? "not-allowed" : "pointer" }}
+                  >
+                    {children}
+                  </a>
+                );
+              }
+              return (
+                <a
+                  href={href}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    if (href) openUrl(href);
+                  }}
+                  style={{ cursor: "pointer" }}
+                >
+                  {children}
+                </a>
+              );
+            },
             p: ({ children }) => <p>{renderWithTags(children)}</p>,
             li: ({ children }) => <li>{renderWithTags(children)}</li>,
             img: ({ src, alt }) => {
@@ -298,6 +499,33 @@ export default function Preview({ content, notePath, darkMode = true }: Props) {
           {debouncedContent}
         </Markdown>
       </div>
+      {notePath && backlinks.length > 0 && (
+        <div className="mt-8 pt-4 border-t border-gray-300/40 dark:border-gray-700/40">
+          <div className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
+            Backlinks ({backlinks.length})
+          </div>
+          <ul className="space-y-1">
+            {backlinks.map((b) => (
+              <li key={b.path}>
+                <button
+                  onClick={() => onOpenNote?.(b.path)}
+                  className="text-sm text-accent hover:underline cursor-pointer text-left"
+                >
+                  {b.title}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menuItems}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 }

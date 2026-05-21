@@ -18,6 +18,13 @@
   user-select: none;
 }
 
+/* Allow selection within preview content */
+.markdown-body, .markdown-body * {
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: auto;
+}
+
 /* Markdown rendered content */
 .markdown-body h1 { font-size: 2em; font-weight: 700; margin: 0.67em 0; border-bottom: 1px solid currentColor; padding-bottom: 0.3em; opacity: 0.8; }
 .markdown-body h2 { font-size: 1.5em; font-weight: 600; margin: 0.75em 0 0.5em; border-bottom: 1px solid currentColor; padding-bottom: 0.2em; opacity: 0.7; }
@@ -38,6 +45,18 @@
 .markdown-body hr { border: none; border-top: 1px solid rgba(128,128,128,0.3); margin: 1.5em 0; }
 .markdown-body img { max-width: 100%; border-radius: 8px; }
 .markdown-body input[type="checkbox"] { margin-right: 0.4em; }
+.markdown-body .wiki-link {
+  color: #22C55E;
+  text-decoration: none;
+  border-bottom: 1px dashed currentColor;
+  padding-bottom: 1px;
+}
+.markdown-body .wiki-link:hover { text-decoration: none; opacity: 0.85; }
+.markdown-body .wiki-link-broken {
+  color: #ef4444;
+  border-bottom-style: dotted;
+}
+.markdown-body .wiki-link-broken:hover { opacity: 0.85; }
 
 /* Editor textarea */
 .editor-textarea {

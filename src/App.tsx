@@ -19,6 +19,7 @@ import FavoritesPanel from "./components/FavoritesPanel";
 import GraphView from "./components/GraphView";
 import ImportDialog from "./components/ImportDialog";
 import VaultPicker from "./components/VaultPicker";
+import QuickSwitcher from "./components/QuickSwitcher";
 import type { TreeNode } from "./types";
 
 type ViewMode = "edit" | "preview" | "split" | "dashboard";
@@ -51,6 +52,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [showQuickSwitcher, setShowQuickSwitcher] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("split");
 
   const isDashboard = useMemo(
@@ -196,11 +198,14 @@ export default function App() {
     };
   }, [refreshTree, refreshTags, updateContent]);
 
-  // Sync index when app gets focus (catches changes from other devices)
+  // Sync index when app gets focus (catches changes from other devices).
+  // Uses the incremental `sync_index` rather than `rebuild_index` so we don't
+  // re-stamp every note's updated_at on each focus event (which would destroy
+  // sort-by-updated ordering).
   useEffect(() => {
     const handleFocus = async () => {
       try {
-        await invoke("rebuild_index");
+        await invoke("sync_index");
         await refreshTree();
         await refreshTags();
       } catch (err) {
@@ -210,6 +215,18 @@ export default function App() {
     window.addEventListener("focus", handleFocus);
     return () => window.removeEventListener("focus", handleFocus);
   }, [refreshTree, refreshTags]);
+
+  // Global Cmd/Ctrl+P: toggle the quick switcher
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "p") {
+        e.preventDefault();
+        setShowQuickSwitcher((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Apply theme
   useEffect(() => {
@@ -736,7 +753,7 @@ ${previewEl.innerHTML}
                   className="h-full overflow-auto"
                   style={{ width: viewMode === "split" ? `${(1 - splitRatio) * 100}%` : "100%" }}
                 >
-                  <Preview content={note.content} notePath={note.path} darkMode={settings.dark_theme} />
+                  <Preview content={note.content} notePath={note.path} darkMode={settings.dark_theme} onOpenNote={handleSelectNote} />
                 </div>
               )}
             </div>
@@ -781,6 +798,15 @@ ${previewEl.innerHTML}
           placeholder={inputDialog.placeholder}
           onConfirm={inputDialog.onConfirm}
           onCancel={() => setInputDialog(null)}
+        />
+      )}
+
+      {/* Quick switcher (Cmd/Ctrl+P) */}
+      {showQuickSwitcher && (
+        <QuickSwitcher
+          vaultRoot={settings.notes_directory}
+          onSelectNote={handleSelectNote}
+          onClose={() => setShowQuickSwitcher(false)}
         />
       )}
 
