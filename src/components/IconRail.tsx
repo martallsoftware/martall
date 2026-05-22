@@ -1,4 +1,4 @@
-export type SidebarPanel = "home" | "notes" | "favorites" | "recent" | "tags" | "graph" | "search" | "vaults";
+export type SidebarPanel = "home" | "notes" | "favorites" | "recent" | "tags" | "graph" | "search" | "vaults" | "calendar" | "tasks";
 
 interface Props {
   active: SidebarPanel;
@@ -42,6 +42,28 @@ const ITEMS: { id: SidebarPanel; label: string; icon: React.ReactNode }[] = [
       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
         <circle cx="10" cy="10" r="8" />
         <path d="M10 5v5l3.5 2" />
+      </svg>
+    ),
+  },
+  {
+    id: "calendar",
+    label: "Calendar",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="4" width="14" height="13" rx="2" />
+        <path d="M3 8h14M7 3v3M13 3v3" />
+        <circle cx="10" cy="12" r="1" fill="currentColor" />
+      </svg>
+    ),
+  },
+  {
+    id: "tasks",
+    label: "Tasks",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="3" width="14" height="14" rx="2" />
+        <path d="M6 7l2 2 4-5" />
+        <path d="M6 13h7" />
       </svg>
     ),
   },

@@ -104,6 +104,18 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_note_links_target ON note_links(target);
         CREATE INDEX IF NOT EXISTS idx_note_links_target_lower ON note_links(LOWER(target));
 
+        CREATE TABLE IF NOT EXISTS task_dates (
+            note_id    INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+            line_index INTEGER NOT NULL,
+            due_date   TEXT NOT NULL,
+            done       INTEGER NOT NULL,
+            text       TEXT NOT NULL,
+            PRIMARY KEY (note_id, line_index)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_task_dates_due ON task_dates(due_date);
+        CREATE INDEX IF NOT EXISTS idx_task_dates_open_due ON task_dates(done, due_date);
+
         CREATE TABLE IF NOT EXISTS favorites (
             rel_path TEXT NOT NULL UNIQUE,
             added_at INTEGER NOT NULL DEFAULT 0
@@ -177,6 +189,23 @@ fn migrate(conn: &Connection) {
             let _ = conn.execute("UPDATE notes SET modified_at = 0", []);
         }
     }
+
+    // Same idea for task due dates (`📅` marker on checkbox lines).
+    let tasks_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM task_dates", [], |r| r.get(0))
+        .unwrap_or(0);
+    if tasks_count == 0 {
+        let has_task_syntax: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM notes WHERE content LIKE '%📅%' LIMIT 1)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if has_task_syntax {
+            let _ = conn.execute("UPDATE notes SET modified_at = 0", []);
+        }
+    }
 }
 
 /// Extract #tags from markdown content, ignoring code blocks
@@ -217,6 +246,50 @@ pub fn extract_tags(content: &str) -> Vec<String> {
     tags.sort();
     tags.dedup();
     tags
+}
+
+#[derive(Debug, Clone)]
+pub struct ExtractedTask {
+    pub line_index: i64,
+    pub due_date: String,
+    pub done: bool,
+    pub text: String,
+}
+
+/// Extract task lines (`- [ ] … 📅 YYYY-MM-DD`) with their due dates.
+/// Only checkbox lines (`- [ ]` / `- [x]`) carrying a `📅 <date>` marker
+/// are returned. The date marker is stripped from `text`.
+pub fn extract_task_dates(content: &str) -> Vec<ExtractedTask> {
+    let checkbox_re = Regex::new(r"^\s*[-*]\s*\[([ xX])\]\s*(.*)$").unwrap();
+    let date_re = Regex::new(r"📅\s*(\d{4})-(\d{2})-(\d{2})").unwrap();
+    let mut out = Vec::new();
+    for (i, line) in content.lines().enumerate() {
+        let cap = match checkbox_re.captures(line) {
+            Some(c) => c,
+            None => continue,
+        };
+        let status = cap.get(1).map(|m| m.as_str()).unwrap_or(" ");
+        let rest = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+        let date_cap = match date_re.captures(rest) {
+            Some(c) => c,
+            None => continue,
+        };
+        let y: i32 = date_cap[1].parse().unwrap_or(0);
+        let m: u32 = date_cap[2].parse().unwrap_or(0);
+        let d: u32 = date_cap[3].parse().unwrap_or(0);
+        if y < 1900 || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+            continue;
+        }
+        let due_date = format!("{:04}-{:02}-{:02}", y, m, d);
+        let text = date_re.replace_all(rest, "").trim().to_string();
+        out.push(ExtractedTask {
+            line_index: i as i64,
+            due_date,
+            done: matches!(status, "x" | "X"),
+            text,
+        });
+    }
+    out
 }
 
 /// Extract `[[wiki link]]` targets from markdown content, ignoring code blocks.
@@ -349,6 +422,20 @@ pub fn upsert_note(conn: &Connection, rp: &str, title: &str, content: &str, mtim
     ) {
         sync_note_tags(conn, note_id, content);
         sync_note_links(conn, note_id, content);
+        sync_note_task_dates(conn, note_id, content);
+    }
+}
+
+/// Sync task due dates for a specific note
+fn sync_note_task_dates(conn: &Connection, note_id: i64, content: &str) {
+    let tasks = extract_task_dates(content);
+    let _ = conn.execute("DELETE FROM task_dates WHERE note_id = ?", params![note_id]);
+    for t in &tasks {
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO task_dates (note_id, line_index, due_date, done, text)
+             VALUES (?, ?, ?, ?, ?)",
+            params![note_id, t.line_index, t.due_date, t.done as i32, t.text],
+        );
     }
 }
 
@@ -741,6 +828,96 @@ pub fn get_tag_graph(conn: &Connection, notes_dir: &str) -> TagGraph {
     }
 
     TagGraph { tags, notes, edges }
+}
+
+// MARK: - Task Due Dates
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskItem {
+    pub note_path: String,
+    pub note_title: String,
+    pub line_index: i64,
+    pub due_date: String,
+    pub done: bool,
+    pub text: String,
+}
+
+/// Return tasks with due dates, ordered by date. If `include_done` is false,
+/// only open tasks are returned.
+pub fn get_due_tasks(
+    conn: &Connection,
+    notes_dir: &str,
+    include_done: bool,
+) -> Vec<TaskItem> {
+    let root = Path::new(notes_dir);
+    let sql = if include_done {
+        "SELECT n.rel_path, n.title, td.line_index, td.due_date, td.done, td.text
+         FROM task_dates td
+         JOIN notes n ON n.id = td.note_id
+         ORDER BY td.done ASC, td.due_date ASC"
+    } else {
+        "SELECT n.rel_path, n.title, td.line_index, td.due_date, td.done, td.text
+         FROM task_dates td
+         JOIN notes n ON n.id = td.note_id
+         WHERE td.done = 0
+         ORDER BY td.due_date ASC"
+    };
+    let mut stmt = match conn.prepare(sql) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    stmt.query_map([], |row| {
+        let rp: String = row.get(0)?;
+        let full_path = root.join(&rp).to_string_lossy().to_string();
+        Ok(TaskItem {
+            note_path: full_path,
+            note_title: row.get(1)?,
+            line_index: row.get(2)?,
+            due_date: row.get(3)?,
+            done: row.get::<_, i64>(4)? != 0,
+            text: row.get(5)?,
+        })
+    })
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
+}
+
+// MARK: - Daily Notes
+
+pub const DAILY_FOLDER: &str = "Daily";
+
+fn is_iso_date(s: &str) -> bool {
+    if s.len() != 10 { return false; }
+    let bytes = s.as_bytes();
+    bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && [0,1,2,3,5,6,8,9].iter().all(|&i| bytes[i].is_ascii_digit())
+}
+
+/// All daily-note dates ("YYYY-MM-DD") found in the index under `Daily/`.
+pub fn list_daily_notes(conn: &Connection) -> Vec<String> {
+    let pattern = format!("{}/%", DAILY_FOLDER);
+    let mut stmt = match conn.prepare(
+        "SELECT rel_path FROM notes WHERE rel_path LIKE ? ORDER BY rel_path",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let prefix_len = DAILY_FOLDER.len() + 1; // "Daily/"
+    let rows = match stmt.query_map(params![&pattern], |row| row.get::<_, String>(0)) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for rp in rows.flatten() {
+        if rp.ends_with(".md") && rp.len() > prefix_len + 3 {
+            let date = &rp[prefix_len..rp.len() - 3];
+            if is_iso_date(date) {
+                out.push(date.to_string());
+            }
+        }
+    }
+    out
 }
 
 // MARK: - Wiki Links

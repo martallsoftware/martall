@@ -236,10 +236,46 @@ function LocalImage({
   return <img src={dataUrl} alt={alt} style={style} />;
 }
 
-/** Renders #tags as styled pills within text content */
+/** Color bucket for a due date relative to today. */
+function dueDateBucket(date: string): "overdue" | "today" | "soon" | "later" {
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  if (date < todayStr) return "overdue";
+  if (date === todayStr) return "today";
+  const due = new Date(date + "T00:00:00");
+  const today = new Date(todayStr + "T00:00:00");
+  const diffDays = Math.round((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  return diffDays <= 7 ? "soon" : "later";
+}
+
+const DUE_PILL_CLASSES: Record<ReturnType<typeof dueDateBucket>, string> = {
+  overdue: "bg-red-500/15 text-red-500",
+  today: "bg-amber-500/20 text-amber-600 dark:text-amber-400",
+  soon: "bg-accent/15 text-accent",
+  later: "bg-gray-500/15 text-gray-500 dark:text-gray-400",
+};
+
+function DueDatePill({ date }: { date: string }) {
+  const cls = DUE_PILL_CLASSES[dueDateBucket(date)];
+  return (
+    <span
+      className={`inline-flex items-center gap-0.5 px-1.5 py-0 text-[0.8em] rounded-full font-medium mx-0.5 ${cls}`}
+      title={`Due ${date}`}
+    >
+      <span>📅</span>
+      <span>{date}</span>
+    </span>
+  );
+}
+
+/** Renders #tags as styled pills and 📅 YYYY-MM-DD as colored due-date pills. */
 function renderWithTags(children: React.ReactNode): React.ReactNode {
   if (typeof children === "string") {
-    const parts = children.split(/((?:^|(?<=\s))#\p{L}[\p{L}\p{N}_/-]*)/gu);
+    // Single splitter that captures either a tag (with optional leading whitespace)
+    // or a `📅 YYYY-MM-DD` marker.
+    const parts = children.split(
+      /((?:^|(?<=\s))#\p{L}[\p{L}\p{N}_/-]*|📅\s*\d{4}-\d{2}-\d{2})/gu,
+    );
     if (parts.length === 1) return children;
     return parts.map((part, i) => {
       if (/^#\p{L}/u.test(part)) {
@@ -251,6 +287,10 @@ function renderWithTags(children: React.ReactNode): React.ReactNode {
             {part}
           </span>
         );
+      }
+      const dueMatch = part.match(/^📅\s*(\d{4}-\d{2}-\d{2})$/);
+      if (dueMatch) {
+        return <DueDatePill key={i} date={dueMatch[1]} />;
       }
       // Check if part starts with whitespace + #tag (lookbehind matched \s)
       const wsMatch = part.match(/^(\s+)(#\p{L}[\p{L}\p{N}_/-]*)$/u);

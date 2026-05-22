@@ -20,6 +20,8 @@ import GraphView from "./components/GraphView";
 import ImportDialog from "./components/ImportDialog";
 import VaultPicker from "./components/VaultPicker";
 import QuickSwitcher from "./components/QuickSwitcher";
+import CalendarPanel from "./components/CalendarPanel";
+import TasksPanel from "./components/TasksPanel";
 import type { TreeNode } from "./types";
 
 type ViewMode = "edit" | "preview" | "split" | "dashboard";
@@ -44,7 +46,10 @@ export default function App() {
   const { settings, updateSettings, loaded } = useSettings();
   const { tree, refreshTree } = useTree();
   const { tags, activeTag, selectTag, tagResults, refreshTags } = useTags();
-  const { note, saving, openNote, updateContent, closeNote } = useNote(refreshTags);
+  const { note, saving, openNote, updateContent, closeNote } = useNote(() => {
+    refreshTags();
+    setTasksRefreshKey((k) => k + 1);
+  });
   const { createFolder, createNote, renameNode, deleteNode, moveNode } =
     useNodeOps(refreshTree);
   const { query, setQuery, results, searching, clearSearch } = useSearch();
@@ -69,6 +74,8 @@ export default function App() {
   }, [isDashboard, note?.path]);
   const [isFavorite, setIsFavorite] = useState(false);
   const [favRefreshKey, setFavRefreshKey] = useState(0);
+  const [dailyRefreshKey, setDailyRefreshKey] = useState(0);
+  const [tasksRefreshKey, setTasksRefreshKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [splitRatio, setSplitRatio] = useState(0.5);
   const splitContainerRef = useRef<HTMLDivElement>(null);
@@ -255,6 +262,34 @@ export default function App() {
     },
     [openNote],
   );
+
+  const handleSelectDay = useCallback(
+    async (date: string) => {
+      try {
+        const path = await invoke<string>("open_or_create_daily_note", { date });
+        await handleSelectNote(path);
+        await refreshTree();
+        setDailyRefreshKey((k) => k + 1);
+      } catch (err) {
+        console.error("Failed to open daily note:", err);
+      }
+    },
+    [handleSelectNote, refreshTree],
+  );
+
+  // Global Cmd/Ctrl+Shift+D: jump to today's daily note
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "d") {
+        e.preventDefault();
+        const d = new Date();
+        const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+        handleSelectDay(ymd);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [handleSelectDay]);
 
   const handleCreateNote = useCallback(
     async (parentDir: string, name: string) => {
@@ -488,6 +523,22 @@ ${previewEl.innerHTML}
         {/* Panel: Recent */}
         {activePanel === "recent" && (
           <RecentPanel onSelectNote={handleSelectNote} />
+        )}
+
+        {/* Panel: Calendar */}
+        {activePanel === "calendar" && (
+          <CalendarPanel
+            onSelectDay={handleSelectDay}
+            refreshKey={dailyRefreshKey}
+          />
+        )}
+
+        {/* Panel: Tasks */}
+        {activePanel === "tasks" && (
+          <TasksPanel
+            onSelectNote={handleSelectNote}
+            refreshKey={tasksRefreshKey}
+          />
         )}
 
         {/* Panel: Tags */}

@@ -819,6 +819,71 @@ fn get_backlinks(
 }
 
 // ---------------------------------------------------------------------------
+// Task due dates
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_due_tasks(
+    state: State<'_, AppState>,
+    include_done: Option<bool>,
+) -> Result<Vec<database::TaskItem>, String> {
+    let settings = state.settings.lock().unwrap();
+    let db = state.db.lock().unwrap();
+    Ok(database::get_due_tasks(
+        &db,
+        &settings.notes_directory,
+        include_done.unwrap_or(false),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Daily notes
+// ---------------------------------------------------------------------------
+
+fn is_iso_date_str(s: &str) -> bool {
+    if s.len() != 10 { return false; }
+    let bytes = s.as_bytes();
+    bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && [0,1,2,3,5,6,8,9].iter().all(|&i| bytes[i].is_ascii_digit())
+}
+
+#[tauri::command]
+fn list_daily_notes(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let db = state.db.lock().unwrap();
+    Ok(database::list_daily_notes(&db))
+}
+
+/// Open the daily note for `date` (YYYY-MM-DD), creating `Daily/<date>.md`
+/// from a small template if it doesn't exist. Returns the absolute path.
+#[tauri::command]
+fn open_or_create_daily_note(
+    state: State<'_, AppState>,
+    date: String,
+) -> Result<String, String> {
+    if !is_iso_date_str(&date) {
+        return Err("Invalid date; expected YYYY-MM-DD".into());
+    }
+    let settings = state.settings.lock().unwrap();
+    let root = Path::new(&settings.notes_directory);
+    let daily_dir = root.join(database::DAILY_FOLDER);
+    fs::create_dir_all(&daily_dir).map_err(|e| e.to_string())?;
+    let note_path = daily_dir.join(format!("{}.md", date));
+    if !note_path.exists() {
+        let template = format!("# {}\n\n", date);
+        fs::write(&note_path, &template).map_err(|e| e.to_string())?;
+        let db = state.db.lock().unwrap();
+        let mtime = fs::metadata(&note_path)
+            .and_then(|m| m.modified())
+            .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
+            .unwrap_or(0);
+        let rp = format!("{}/{}.md", database::DAILY_FOLDER, date);
+        database::upsert_note(&db, &rp, &date, &template, mtime);
+    }
+    Ok(note_path.to_string_lossy().to_string())
+}
+
+// ---------------------------------------------------------------------------
 // Favorites
 // ---------------------------------------------------------------------------
 
@@ -1062,6 +1127,9 @@ pub fn run() {
             get_tag_graph,
             resolve_wiki_links,
             get_backlinks,
+            list_daily_notes,
+            open_or_create_daily_note,
+            get_due_tasks,
             is_favorite,
             toggle_favorite,
             get_favorite_notes,
