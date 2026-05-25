@@ -236,6 +236,116 @@ function LocalImage({
   return <img src={dataUrl} alt={alt} style={style} />;
 }
 
+/**
+ * Extract a YouTube video ID from a URL. Supports watch?v=, youtu.be,
+ * /embed/, and /shorts/ forms. Returns null for non-YouTube URLs.
+ */
+function extractYouTubeId(url: string): string | null {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\.|^m\./, "");
+    if (host === "youtu.be") {
+      const id = u.pathname.slice(1).split("/")[0];
+      return /^[\w-]{11}$/.test(id) ? id : null;
+    }
+    if (host === "youtube.com" || host === "youtube-nocookie.com") {
+      if (u.pathname === "/watch") {
+        const v = u.searchParams.get("v") || "";
+        return /^[\w-]{11}$/.test(v) ? v : null;
+      }
+      const m = u.pathname.match(/^\/(?:embed|shorts|live)\/([\w-]{11})/);
+      if (m) return m[1];
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * If `node` has exactly one child (or one child wrapped in a paragraph) that
+ * is a link to a YouTube URL, returns its video ID. Used by the `p` and `li`
+ * overrides so the embed triggers in both paragraphs and (tight or loose)
+ * list items.
+ */
+function soleYouTubeIdOf(node: unknown): string | null {
+  const n = node as { children?: Array<unknown> } | undefined;
+  if (!n?.children || n.children.length !== 1) return null;
+  let child = n.children[0] as { type?: string; url?: string; children?: Array<unknown> };
+  if (child.type === "paragraph" && child.children?.length === 1) {
+    child = child.children[0] as typeof child;
+  }
+  if (child.type === "link" && typeof child.url === "string") {
+    return extractYouTubeId(child.url);
+  }
+  return null;
+}
+
+function YouTubeEmbed({ id }: { id: string }) {
+  const [playing, setPlaying] = useState(false);
+
+  // Shared frame: 16:9, capped at 480px wide so a row of videos in a note
+  // doesn't blow up the layout, but still fills narrow viewports.
+  const frame: React.CSSProperties = {
+    position: "relative",
+    paddingBottom: "56.25%",
+    width: "100%",
+    maxWidth: 480,
+  };
+
+  if (playing) {
+    return (
+      <div className="my-3 rounded-lg overflow-hidden bg-black" style={frame}>
+        <iframe
+          src={`https://www.youtube-nocookie.com/embed/${id}?autoplay=1`}
+          title="YouTube video"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+          allowFullScreen
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            width: "100%",
+            height: "100%",
+            border: 0,
+          }}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => setPlaying(true)}
+      title="Play"
+      className="my-3 rounded-lg overflow-hidden bg-black block group cursor-pointer"
+      style={frame}
+    >
+      <img
+        src={`https://i.ytimg.com/vi/${id}/hqdefault.jpg`}
+        alt="YouTube video thumbnail"
+        loading="lazy"
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          width: "100%",
+          height: "100%",
+          objectFit: "cover",
+        }}
+      />
+      <div className="absolute inset-0 flex items-center justify-center bg-black/15 group-hover:bg-black/25 transition-colors">
+        <div className="w-16 h-16 rounded-full bg-red-600/95 flex items-center justify-center shadow-xl group-hover:scale-110 transition-transform">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="white" aria-hidden="true">
+            <path d="M8 5v14l11-7z" />
+          </svg>
+        </div>
+      </div>
+    </button>
+  );
+}
+
 /** Color bucket for a due date relative to today. */
 function dueDateBucket(date: string): "overdue" | "today" | "soon" | "later" {
   const now = new Date();
@@ -512,8 +622,24 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
                 </a>
               );
             },
-            p: ({ children }) => <p>{renderWithTags(children)}</p>,
-            li: ({ children }) => <li>{renderWithTags(children)}</li>,
+            p: ({ node, children }) => {
+              const ytId = soleYouTubeIdOf(node);
+              if (ytId) return <YouTubeEmbed id={ytId} />;
+              return <p>{renderWithTags(children)}</p>;
+            },
+            li: ({ node, children }) => {
+              // Tight list items get the link as a direct child; loose lists
+              // wrap it in a paragraph. `soleYouTubeIdOf` handles both.
+              const ytId = soleYouTubeIdOf(node);
+              if (ytId) {
+                return (
+                  <li style={{ listStyle: "none" }}>
+                    <YouTubeEmbed id={ytId} />
+                  </li>
+                );
+              }
+              return <li>{renderWithTags(children)}</li>;
+            },
             img: ({ src, alt }) => {
               const rawAlt = alt || "";
               const { cleanAlt, style } = parseImageSize(rawAlt);

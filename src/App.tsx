@@ -630,13 +630,30 @@ ${previewEl.innerHTML}
             </svg>
           </button>
 
-          {/* Note title */}
+          {/* Note title / breadcrumb */}
           {activePanel === "graph" && !note ? (
             <span className="text-sm font-medium truncate">Tag Graph</span>
           ) : note ? (
-            <span className="text-sm font-medium truncate">
-              {note.path.split(/[/\\]/).pop()?.replace(".md", "")}
-            </span>
+            (() => {
+              const root = settings.notes_directory;
+              let rel = note.path;
+              if (root && rel.startsWith(root)) {
+                rel = rel.slice(root.length).replace(/^[\\/]+/, "");
+              }
+              const parts = rel.split(/[\\/]/);
+              const filename = (parts.pop() || "").replace(/\.md$/, "");
+              return (
+                <div className="flex items-center gap-1 min-w-0 text-sm truncate">
+                  {parts.map((folder, i) => (
+                    <span key={i} className="flex items-center gap-1 text-gray-400 dark:text-gray-500 truncate">
+                      <span className="truncate">{folder}</span>
+                      <span className="text-gray-300 dark:text-gray-600">›</span>
+                    </span>
+                  ))}
+                  <span className="font-medium truncate">{filename}</span>
+                </div>
+              );
+            })()
           ) : (
             <span className="text-sm text-gray-400">No note selected</span>
           )}
