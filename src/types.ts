@@ -27,6 +27,8 @@ export interface SearchResult {
   path: string;
   title: string;
   snippet: string;
+  vault?: string;
+  vault_path?: string;
 }
 
 export interface TagInfo {

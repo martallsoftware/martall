@@ -14,6 +14,10 @@ pub struct SearchResult {
     pub path: String,
     pub title: String,
     pub snippet: String,
+    #[serde(default)]
+    pub vault: String,
+    #[serde(default)]
+    pub vault_path: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -556,6 +560,8 @@ pub fn search(conn: &Connection, notes_dir: &str, query: &str) -> Vec<SearchResu
             path: full_path,
             title,
             snippet,
+            vault: String::new(),
+            vault_path: String::new(),
         })
     })
     .unwrap()
@@ -609,6 +615,8 @@ pub fn get_notes_by_tag(conn: &Connection, notes_dir: &str, tag: &str) -> Vec<Se
             path: full_path,
             title,
             snippet,
+            vault: String::new(),
+            vault_path: String::new(),
         })
     })
     .unwrap()

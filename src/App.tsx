@@ -52,7 +52,7 @@ export default function App() {
   });
   const { createFolder, createNote, renameNode, deleteNode, moveNode } =
     useNodeOps(refreshTree);
-  const { query, setQuery, results, searching, clearSearch } = useSearch();
+  const { query, setQuery, results, searching, clearSearch, scope, setScope } = useSearch();
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
@@ -261,6 +261,27 @@ export default function App() {
       }
     },
     [openNote],
+  );
+
+  const handleSelectSearchResult = useCallback(
+    async (result: import("./types").SearchResult) => {
+      const target = result.vault_path;
+      if (target && target !== settingsRef.current.notes_directory) {
+        try {
+          await invoke("switch_vault", { path: target });
+          closeNote();
+          const s = await invoke<import("./types").Settings>("get_settings");
+          await updateSettings(s);
+          await refreshTree();
+          await refreshTags();
+        } catch (err) {
+          console.error("Failed to switch vault:", err);
+          return;
+        }
+      }
+      await handleSelectNote(result.path);
+    },
+    [handleSelectNote, closeNote, updateSettings, refreshTree, refreshTags],
   );
 
   const handleSelectDay = useCallback(
@@ -583,8 +604,10 @@ ${previewEl.innerHTML}
               setQuery={setQuery}
               results={results}
               searching={searching}
-              onSelect={handleSelectNote}
+              onSelect={handleSelectSearchResult}
               onClear={clearSearch}
+              scope={scope}
+              setScope={setScope}
             />
           </div>
         )}

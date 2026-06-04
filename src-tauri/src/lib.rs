@@ -708,6 +708,62 @@ fn platform_pdf(html_path: &Path, pdf_path: &str) -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Reveal in OS file manager
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn reveal_in_file_manager(path: String) -> Result<(), String> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(format!("Path does not exist: {}", path));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .args(["-R", &path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if p.is_dir() {
+            std::process::Command::new("explorer")
+                .arg(&path)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        } else {
+            std::process::Command::new("explorer")
+                .arg(format!("/select,{}", path))
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let target = if p.is_dir() {
+            path.clone()
+        } else {
+            p.parent()
+                .map(|d| d.to_string_lossy().to_string())
+                .unwrap_or(path.clone())
+        };
+        std::process::Command::new("xdg-open")
+            .arg(&target)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("Unsupported platform".to_string())
+}
+
+// ---------------------------------------------------------------------------
 // Search and tag commands
 // ---------------------------------------------------------------------------
 
@@ -715,7 +771,69 @@ fn platform_pdf(html_path: &Path, pdf_path: &str) -> Result<String, String> {
 fn search_notes(state: State<'_, AppState>, query: String) -> Result<Vec<database::SearchResult>, String> {
     let settings = state.settings.lock().unwrap();
     let db = state.db.lock().unwrap();
-    Ok(database::search(&db, &settings.notes_directory, &query))
+    let mut results = database::search(&db, &settings.notes_directory, &query);
+    let active_name = settings
+        .vaults
+        .iter()
+        .find(|v| v.path == settings.notes_directory)
+        .map(|v| v.name.clone())
+        .unwrap_or_default();
+    for r in results.iter_mut() {
+        r.vault = active_name.clone();
+        r.vault_path = settings.notes_directory.clone();
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+fn search_all_vaults(state: State<'_, AppState>, query: String) -> Result<Vec<database::SearchResult>, String> {
+    let (vaults, active_path) = {
+        let s = state.settings.lock().unwrap();
+        (s.vaults.clone(), s.notes_directory.clone())
+    };
+
+    let mut merged: Vec<database::SearchResult> = Vec::new();
+
+    for v in &vaults {
+        let mut results = if v.path == active_path {
+            let db = state.db.lock().unwrap();
+            database::search(&db, &v.path, &query)
+        } else {
+            match database::open_db(&v.path) {
+                Ok(conn) => database::search(&conn, &v.path, &query),
+                Err(_) => continue,
+            }
+        };
+        for r in results.iter_mut() {
+            r.vault = v.name.clone();
+            r.vault_path = v.path.clone();
+        }
+        merged.append(&mut results);
+    }
+
+    Ok(merged)
+}
+
+#[tauri::command]
+fn sync_all_vault_indexes(state: State<'_, AppState>) -> Result<(), String> {
+    let (vaults, active_path) = {
+        let s = state.settings.lock().unwrap();
+        (s.vaults.clone(), s.notes_directory.clone())
+    };
+
+    for v in &vaults {
+        if v.path == active_path {
+            continue;
+        }
+        if !Path::new(&v.path).exists() {
+            continue;
+        }
+        if let Ok(conn) = database::open_db(&v.path) {
+            database::sync_index(&conn, &v.path);
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -1117,6 +1235,9 @@ pub fn run() {
             export_html,
             export_pdf,
             search_notes,
+            search_all_vaults,
+            sync_all_vault_indexes,
+            reveal_in_file_manager,
             get_all_tags,
             get_notes_by_tag,
             get_note_tags,

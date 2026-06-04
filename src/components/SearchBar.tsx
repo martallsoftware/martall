@@ -1,13 +1,16 @@
 import { useRef, useEffect } from "react";
 import type { SearchResult } from "../types";
+import type { SearchScope } from "../hooks/useSearch";
 
 interface Props {
   query: string;
   setQuery: (q: string) => void;
   results: SearchResult[];
   searching: boolean;
-  onSelect: (path: string) => void;
+  onSelect: (result: SearchResult) => void;
   onClear: () => void;
+  scope: SearchScope;
+  setScope: (s: SearchScope) => void;
 }
 
 export default function SearchBar({
@@ -17,6 +20,8 @@ export default function SearchBar({
   searching,
   onSelect,
   onClear,
+  scope,
+  setScope,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -37,6 +42,7 @@ export default function SearchBar({
   }, [onClear]);
 
   const showResults = query.trim().length > 0;
+  const allVaults = scope === "all";
 
   return (
     <div className="px-2 pt-2 pb-1">
@@ -71,6 +77,19 @@ export default function SearchBar({
         )}
       </div>
 
+      {/* Scope toggle */}
+      <div className="flex items-center justify-end mt-1 px-1">
+        <label className="flex items-center gap-1.5 text-[10px] text-gray-500 dark:text-gray-400 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={allVaults}
+            onChange={(e) => setScope(e.target.checked ? "all" : "current")}
+            className="h-3 w-3 accent-current"
+          />
+          All vaults
+        </label>
+      </div>
+
       {/* Results dropdown */}
       {showResults && (
         <div className="mt-1 max-h-64 overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#252538] shadow-lg">
@@ -86,14 +105,21 @@ export default function SearchBar({
           )}
           {results.map((r) => (
             <button
-              key={r.path}
+              key={`${r.vault_path ?? ""}|${r.path}`}
               onClick={() => {
-                onSelect(r.path);
+                onSelect(r);
                 onClear();
               }}
               className="w-full text-left px-3 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors border-b border-gray-100 dark:border-gray-700/50 last:border-0"
             >
-              <p className="text-xs font-medium truncate">{r.title}</p>
+              <div className="flex items-baseline justify-between gap-2">
+                <p className="text-xs font-medium truncate">{r.title}</p>
+                {allVaults && r.vault && (
+                  <span className="text-[9px] uppercase tracking-wide text-gray-400 shrink-0">
+                    {r.vault}
+                  </span>
+                )}
+              </div>
               <p
                 className="text-[10px] text-gray-400 mt-0.5 line-clamp-2"
                 dangerouslySetInnerHTML={{ __html: r.snippet }}

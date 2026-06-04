@@ -1,10 +1,26 @@
 import { useState, useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { TreeNode } from "../types";
 import type { MenuItem } from "./ContextMenu";
 import ContextMenu from "./ContextMenu";
 import InputDialog from "./InputDialog";
 import ConfirmDialog from "./ConfirmDialog";
 import MoveDialog, { collectFolders } from "./MoveDialog";
+
+const REVEAL_LABEL = (() => {
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+  if (/Mac|iPhone|iPad/.test(ua)) return "Show in Finder";
+  if (/Windows/.test(ua)) return "Show in Explorer";
+  return "Show in file manager";
+})();
+
+async function revealInFileManager(path: string) {
+  try {
+    await invoke("reveal_in_file_manager", { path });
+  } catch (err) {
+    console.error("Failed to reveal in file manager:", err);
+  }
+}
 
 /** Count all notes (non-folder items) recursively under a node */
 function countNotes(node: TreeNode): number {
@@ -274,6 +290,10 @@ export default function TreeView({
             });
           },
         },
+        {
+          label: REVEAL_LABEL,
+          onClick: () => revealInFileManager(rootDir),
+        },
       ];
     }
 
@@ -324,6 +344,10 @@ export default function TreeView({
           },
         },
         {
+          label: REVEAL_LABEL,
+          onClick: () => revealInFileManager(node.path),
+        },
+        {
           label: "Delete",
           danger: true,
           onClick: () => {
@@ -356,6 +380,10 @@ export default function TreeView({
             sourceName: node.name,
           });
         },
+      },
+      {
+        label: REVEAL_LABEL,
+        onClick: () => revealInFileManager(node.path),
       },
       {
         label: "Delete",
