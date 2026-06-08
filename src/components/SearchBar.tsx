@@ -77,8 +77,15 @@ export default function SearchBar({
         )}
       </div>
 
-      {/* Scope toggle */}
-      <div className="flex items-center justify-end mt-1 px-1">
+      {/* Scope toggle + clear */}
+      <div className="flex items-center justify-between mt-1 px-1">
+        <button
+          onClick={onClear}
+          disabled={!query}
+          className="text-[10px] uppercase tracking-wider text-gray-400 hover:text-accent disabled:opacity-30 disabled:hover:text-gray-400 transition-colors"
+        >
+          Clear search
+        </button>
         <label className="flex items-center gap-1.5 text-[10px] text-gray-500 dark:text-gray-400 cursor-pointer select-none">
           <input
             type="checkbox"
@@ -106,10 +113,7 @@ export default function SearchBar({
           {results.map((r) => (
             <button
               key={`${r.vault_path ?? ""}|${r.path}`}
-              onClick={() => {
-                onSelect(r);
-                onClear();
-              }}
+              onClick={() => onSelect(r)}
               className="w-full text-left px-3 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors border-b border-gray-100 dark:border-gray-700/50 last:border-0"
             >
               <div className="flex items-baseline justify-between gap-2">
