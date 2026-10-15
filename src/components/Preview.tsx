@@ -6,6 +6,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import MermaidBlock from "./MermaidBlock";
 import LuaLiveBlock from "./LuaLiveBlock";
 import ContextMenu, { type MenuItem } from "./ContextMenu";
+import { RoutineBar, RoutineHistory } from "./RoutinePanel";
+import { isRoutineNote } from "../utils/routine";
 import type { NoteInfo } from "../types";
 
 interface Props {
@@ -13,6 +15,22 @@ interface Props {
   notePath: string | null;
   darkMode?: boolean;
   onOpenNote?: (path: string) => void;
+  /** When set, task checkboxes are clickable and write the toggled markdown back. */
+  onContentChange?: (content: string) => void;
+}
+
+/** `- [ ] text` / `1. [x] text` (optionally inside a blockquote). Groups: prefix, mark. */
+const TASK_LINE_RE = /^(\s*(?:>\s*)*(?:[-*+]|\d+[.)])\s+\[)([ xX])\]/;
+
+/** Flip the checkbox on 0-based `lineIdx`; returns null if that line isn't a task. */
+function toggleTaskLine(md: string, lineIdx: number): string | null {
+  const lines = md.split("\n");
+  const line = lines[lineIdx];
+  if (line === undefined || !TASK_LINE_RE.test(line)) return null;
+  lines[lineIdx] = line.replace(TASK_LINE_RE, (_m, prefix: string, mark: string) =>
+    `${prefix}${mark === " " ? "x" : " "}]`,
+  );
+  return lines.join("\n");
 }
 
 /**
@@ -425,7 +443,7 @@ function renderWithTags(children: React.ReactNode): React.ReactNode {
   return children;
 }
 
-export default function Preview({ content, notePath, darkMode = true, onOpenNote }: Props) {
+export default function Preview({ content, notePath, darkMode = true, onOpenNote, onContentChange }: Props) {
   const noteDir = useMemo(() => {
     if (!notePath) return null;
     const lastSlash = Math.max(notePath.lastIndexOf("/"), notePath.lastIndexOf("\\"));
@@ -506,6 +524,18 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
 
   // Extract wiki targets from the (debounced) content and batch-resolve them
   // to absolute paths so the renderer can mark broken links and route clicks.
+  const isRoutine = useMemo(() => isRoutineNote(content), [content]);
+
+  const handleToggleTask = (lineIdx: number) => {
+    if (!onContentChange) return;
+    const next = toggleTaskLine(content, lineIdx);
+    if (next === null) return;
+    // Skip the debounce so the checkbox flips immediately.
+    if (timerRef.current) clearTimeout(timerRef.current);
+    setDebouncedContent(fixImagePaths(next));
+    onContentChange(next);
+  };
+
   const wikiTargets = useMemo(() => extractWikiTargets(debouncedContent), [debouncedContent]);
   const [wikiResolved, setWikiResolved] = useState<Record<string, string | null>>({});
 
@@ -552,6 +582,9 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
 
   return (
     <div className="h-full overflow-auto p-5" onContextMenu={handleContextMenu}>
+      {isRoutine && (
+        <RoutineBar content={content} notePath={notePath} onContentChange={onContentChange} />
+      )}
       <div ref={contentRef} className="markdown-body text-gray-800 dark:text-gray-200 max-w-none">
         <Markdown
           remarkPlugins={[remarkGfm, remarkWikiLinks]}
@@ -627,7 +660,19 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
               if (ytId) return <YouTubeEmbed id={ytId} />;
               return <p>{renderWithTags(children)}</p>;
             },
-            li: ({ node, children }) => {
+            input: ({ node: _node, type, checked, ...props }) => {
+              if (type !== "checkbox") return <input type={type} checked={checked} {...props} />;
+              return (
+                <input
+                  type="checkbox"
+                  checked={!!checked}
+                  disabled={!onContentChange}
+                  onChange={() => {}}
+                  className="task-checkbox"
+                />
+              );
+            },
+            li: ({ node, className, children }) => {
               // Tight list items get the link as a direct child; loose lists
               // wrap it in a paragraph. `soleYouTubeIdOf` handles both.
               const ytId = soleYouTubeIdOf(node);
@@ -635,6 +680,23 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
                 return (
                   <li style={{ listStyle: "none" }}>
                     <YouTubeEmbed id={ytId} />
+                  </li>
+                );
+              }
+              if (className?.includes("task-list-item")) {
+                const lineIdx = (node?.position?.start.line ?? 0) - 1;
+                return (
+                  <li
+                    className={className}
+                    onClick={(e) => {
+                      // Only the item's own checkbox; nested items handle theirs.
+                      if ((e.target as HTMLElement).classList.contains("task-checkbox")) {
+                        e.stopPropagation();
+                        handleToggleTask(lineIdx);
+                      }
+                    }}
+                  >
+                    {renderWithTags(children)}
                   </li>
                 );
               }
@@ -665,6 +727,7 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
           {debouncedContent}
         </Markdown>
       </div>
+      {isRoutine && <RoutineHistory content={debouncedContent} dark={darkMode} />}
       {notePath && backlinks.length > 0 && (
         <div className="mt-8 pt-4 border-t border-gray-300/40 dark:border-gray-700/40">
           <div className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">

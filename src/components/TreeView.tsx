@@ -40,7 +40,7 @@ interface Props {
   nodes: TreeNode[];
   selectedPath: string | null;
   onSelectNote: (path: string) => void;
-  onCreateNote: (parentDir: string, name: string) => Promise<void>;
+  onCreateNote: (parentDir: string, name: string, template?: string) => Promise<void>;
   onCreateFolder: (path: string) => Promise<void>;
   onRename: (path: string, newName: string) => Promise<void>;
   onDelete: (path: string) => Promise<void>;
@@ -186,7 +186,8 @@ type DialogState =
       type: "input";
       title: string;
       placeholder: string;
-      onConfirm: (val: string) => void;
+      withTemplates?: boolean;
+      onConfirm: (val: string, template?: string) => void;
     }
   | { type: "confirm"; title: string; message: string; onConfirm: () => void }
   | { type: "move"; sourcePath: string; sourceName: string };
@@ -269,9 +270,10 @@ export default function TreeView({
               type: "input",
               title: "New Note",
               placeholder: "Note name",
-              onConfirm: async (name) => {
+              withTemplates: true,
+              onConfirm: async (name, template) => {
                 setDialog(null);
-                await onCreateNote(rootDir, name);
+                await onCreateNote(rootDir, name, template);
               },
             });
           },
@@ -306,9 +308,10 @@ export default function TreeView({
               type: "input",
               title: "New Note",
               placeholder: "Note name",
-              onConfirm: async (name) => {
+              withTemplates: true,
+              onConfirm: async (name, template) => {
                 setDialog(null);
-                await onCreateNote(node.path, name);
+                await onCreateNote(node.path, name, template);
                 setExpandedPaths((prev) => new Set(prev).add(node.path));
               },
             });
@@ -474,6 +477,7 @@ export default function TreeView({
         <InputDialog
           title={dialog.title}
           placeholder={dialog.placeholder}
+          withTemplates={dialog.withTemplates}
           onConfirm={dialog.onConfirm}
           onCancel={() => setDialog(null)}
         />

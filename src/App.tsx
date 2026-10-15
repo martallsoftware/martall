@@ -124,7 +124,8 @@ export default function App() {
   const [inputDialog, setInputDialog] = useState<{
     title: string;
     placeholder: string;
-    onConfirm: (val: string) => void;
+    withTemplates?: boolean;
+    onConfirm: (val: string, template?: string) => void;
   } | null>(null);
 
   // Refs for drag-drop handler to access latest state
@@ -313,8 +314,8 @@ export default function App() {
   }, [handleSelectDay]);
 
   const handleCreateNote = useCallback(
-    async (parentDir: string, name: string) => {
-      const newPath = await createNote(parentDir, name);
+    async (parentDir: string, name: string, template?: string) => {
+      const newPath = await createNote(parentDir, name, template);
       await openNote(newPath);
       refreshTags();
     },
@@ -452,9 +453,10 @@ ${previewEl.innerHTML}
     setInputDialog({
       title: "New Note",
       placeholder: "Note name",
-      onConfirm: async (name) => {
+      withTemplates: true,
+      onConfirm: async (name, template) => {
         setInputDialog(null);
-        await handleCreateNote(currentFolder, name);
+        await handleCreateNote(currentFolder, name, template);
       },
     });
   }, [currentFolder, handleCreateNote]);
@@ -844,7 +846,7 @@ ${previewEl.innerHTML}
                   className="h-full overflow-auto"
                   style={{ width: viewMode === "split" ? `${(1 - splitRatio) * 100}%` : "100%" }}
                 >
-                  <Preview content={note.content} notePath={note.path} darkMode={settings.dark_theme} onOpenNote={handleSelectNote} />
+                  <Preview content={note.content} notePath={note.path} darkMode={settings.dark_theme} onOpenNote={handleSelectNote} onContentChange={updateContent} />
                 </div>
               )}
             </div>
@@ -887,6 +889,7 @@ ${previewEl.innerHTML}
         <InputDialog
           title={inputDialog.title}
           placeholder={inputDialog.placeholder}
+          withTemplates={inputDialog.withTemplates}
           onConfirm={inputDialog.onConfirm}
           onCancel={() => setInputDialog(null)}
         />

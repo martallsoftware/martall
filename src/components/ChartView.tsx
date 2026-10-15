@@ -29,7 +29,7 @@ export interface ChartSpec {
   kind: "line" | "bar" | "area";
   title?: string;
   labels: (string | number)[];
-  series: { name: string; data: number[]; color?: string }[];
+  series: { name: string; data: (number | null)[]; color?: string }[];
   yLabel?: string;
   xLabel?: string;
 }
@@ -65,6 +65,7 @@ export default function ChartView({ spec, dark = true }: Props) {
                 : color,
           fill: spec.kind === "area",
           tension: 0.25,
+          spanGaps: true,
           pointRadius: spec.kind === "line" || spec.kind === "area" ? 2 : 0,
           borderWidth: 2,
         };

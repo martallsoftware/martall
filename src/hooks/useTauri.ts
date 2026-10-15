@@ -127,8 +127,8 @@ export function useNodeOps(refreshTree: () => Promise<void>) {
   );
 
   const createNote = useCallback(
-    async (parentDir: string, name: string): Promise<string> => {
-      const newPath = await invoke<string>("create_note", { parentDir, name });
+    async (parentDir: string, name: string, template?: string): Promise<string> => {
+      const newPath = await invoke<string>("create_note", { parentDir, name, template });
       await refreshTree();
       return newPath;
     },

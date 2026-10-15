@@ -297,24 +297,90 @@ fn create_folder(path: String) -> Result<(), String> {
     fs::create_dir_all(&path).map_err(|e| e.to_string())
 }
 
+/// Vault folder whose `.md` files are offered as templates for new notes.
+const TEMPLATES_FOLDER: &str = "Templates";
+
+const DEFAULT_TODO_TEMPLATE: &str = "# {{title}}\n\n\
+Created {{date}}\n\n\
+## Todo\n\
+- [ ] \n\n\
+## Done\n";
+
+const DEFAULT_ROUTINE_TEMPLATE: &str = "# {{title}}\n\n\
+#routine\n\n\
+- [ ] Squats 3×8 @ 60kg\n\
+- [ ] Leg press 3×10 @ 100kg\n\
+- [ ] Lunges 3×12\n\
+- [ ] Calf raises 4×15\n\n\
+## Log\n";
+
+/// List template names (file stems) in the vault's `Templates/` folder.
+/// The folder is seeded with `Todo.md` and `Routine.md` the first time.
 #[tauri::command]
-fn create_note(state: State<'_, AppState>, parent_dir: String, name: String) -> Result<String, String> {
+fn list_templates(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let settings = state.settings.lock().unwrap();
+    let dir = Path::new(&settings.notes_directory).join(TEMPLATES_FOLDER);
+    if !dir.exists() {
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        fs::write(dir.join("Todo.md"), DEFAULT_TODO_TEMPLATE).map_err(|e| e.to_string())?;
+        fs::write(dir.join("Routine.md"), DEFAULT_ROUTINE_TEMPLATE).map_err(|e| e.to_string())?;
+    }
+    let mut names: Vec<String> = fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().map_or(false, |x| x == "md"))
+        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    Ok(names)
+}
+
+/// Read `Templates/<name>.md` and fill in `{{title}}`, `{{date}}` and `{{time}}`.
+fn render_template(root: &Path, name: &str, title: &str) -> Result<String, String> {
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err("Invalid template name".into());
+    }
+    let path = root.join(TEMPLATES_FOLDER).join(format!("{}.md", name));
+    let raw = fs::read_to_string(&path).map_err(|e| format!("Template '{}': {}", name, e))?;
+    let now = chrono::Local::now();
+    Ok(raw
+        .replace("{{title}}", title)
+        .replace("{{date}}", &now.format("%Y-%m-%d").to_string())
+        .replace("{{time}}", &now.format("%H:%M").to_string()))
+}
+
+#[tauri::command]
+fn create_note(
+    state: State<'_, AppState>,
+    parent_dir: String,
+    name: String,
+    template: Option<String>,
+) -> Result<String, String> {
     let file_name = if name.ends_with(".md") {
         name.clone()
     } else {
         format!("{}.md", name)
     };
     let full_path = Path::new(&parent_dir).join(&file_name);
-    fs::write(&full_path, "").map_err(|e| e.to_string())?;
+    if full_path.exists() {
+        return Err(format!("A note named '{}' already exists", file_name));
+    }
+    let title = full_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
 
-    // Index the new note
     let settings = state.settings.lock().unwrap();
     let root = Path::new(&settings.notes_directory);
+    let content = match template.as_deref() {
+        Some(t) if !t.is_empty() => render_template(root, t, &title)?,
+        _ => String::new(),
+    };
+    fs::write(&full_path, &content).map_err(|e| e.to_string())?;
+
+    // Index the new note
     if let Ok(rp) = full_path.strip_prefix(root) {
         let rp_str = rp.to_string_lossy().to_string();
-        let title = full_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
         let db = state.db.lock().unwrap();
-        database::upsert_note(&db, &rp_str, &title, "", 0);
+        database::upsert_note(&db, &rp_str, &title, &content, 0);
     }
 
     Ok(full_path.to_string_lossy().to_string())
@@ -1227,6 +1293,7 @@ pub fn run() {
             save_note,
             create_folder,
             create_note,
+            list_templates,
             rename_node,
             delete_node,
             move_node,

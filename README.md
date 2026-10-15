@@ -20,6 +20,47 @@ Version: see top of `package.json`.
 - Import / export (HTML, PDF)
 - Drag-and-drop image insertion at cursor (see below)
 
+### Templates & todos
+- **New Note** (header button or tree context menu) has a **Template** picker.
+  Every `.md` file in the vault's `Templates/` folder is a template; the folder
+  is created with a `Todo.md` template the first time the dialog opens.
+- Placeholders filled in on create: `{{title}}`, `{{date}}` (YYYY-MM-DD), `{{time}}` (HH:MM).
+- Checkboxes (`- [ ] …`) are clickable in the preview and toggle `[ ]` ↔ `[x]`
+  in the file. Add `📅 YYYY-MM-DD` to a task to show it in the Tasks panel.
+
+### Templates
+- **New Note** (header button or tree context menu) has a **Template** picker.
+  Every `.md` file in the vault's `Templates/` folder is a template. The folder
+  is created with `Todo.md` and `Routine.md` the first time the dialog opens.
+- Placeholders filled in on create: `{{title}}`, `{{date}}` (YYYY-MM-DD), `{{time}}` (HH:MM).
+- Checkboxes (`- [ ] …`) are clickable in the preview and toggle `[ ]` ↔ `[x]`
+  in the file. Add `📅 YYYY-MM-DD` to a task to show it in the Tasks panel.
+
+### Routines (recurring checklists)
+A note tagged `#routine` is a reusable checklist, e.g. a gym workout:
+
+```markdown
+# Gym – Legs
+
+#routine
+
+- [ ] Squats 3×8 @ 80kg
+- [ ] Lunges 3×12
+
+## Log
+```
+
+- The preview shows a progress bar and a **Finish session** button.
+- **Finish session** adds a dated line under `## Log` (newest first) with the
+  ticked items and what was skipped, then unticks everything. Edited numbers
+  (`@ 82.5kg`) stay for next time.
+- The session is also linked from that day's daily note, so it shows in the Calendar.
+- Below the note, **History** charts sessions per week and weight progress for
+  every item with an `@ number`.
+
+Log line format:
+`- 2026-10-15 — 3/4 — Squats 3×8 @ 80kg · Leg press 3×10 @ 120kg — skipped: Lunges 3×12`
+
 ### UI
 - **Movable split divider** between editor and preview. Drag to resize,
   double-click to reset to 50/50. The ratio is persisted to settings.
