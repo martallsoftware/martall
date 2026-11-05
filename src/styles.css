@@ -96,3 +96,8 @@
   .markdown-body th, .markdown-body td { border-color: #ddd !important; color: black !important; }
   .markdown-body th { background: #f8f8f8 !important; }
 }
+
+/* Empty <input type="date">: hide WebKit's greyed-out placeholder date so an
+   unset field doesn't look like it already has today's date. */
+input[type="date"].date-empty::-webkit-datetime-edit { color: transparent; }
+input[type="date"].date-empty:focus::-webkit-datetime-edit { color: inherit; }

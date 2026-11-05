@@ -125,7 +125,7 @@ export default function App() {
     title: string;
     placeholder: string;
     withTemplates?: boolean;
-    onConfirm: (val: string, template?: string) => void;
+    onConfirm: (val: string, template?: string, answers?: Record<string, string>) => void;
   } | null>(null);
 
   // Refs for drag-drop handler to access latest state
@@ -314,8 +314,8 @@ export default function App() {
   }, [handleSelectDay]);
 
   const handleCreateNote = useCallback(
-    async (parentDir: string, name: string, template?: string) => {
-      const newPath = await createNote(parentDir, name, template);
+    async (parentDir: string, name: string, template?: string, answers?: Record<string, string>) => {
+      const newPath = await createNote(parentDir, name, template, answers);
       await openNote(newPath);
       refreshTags();
     },
@@ -454,9 +454,9 @@ ${previewEl.innerHTML}
       title: "New Note",
       placeholder: "Note name",
       withTemplates: true,
-      onConfirm: async (name, template) => {
+      onConfirm: async (name, template, answers) => {
         setInputDialog(null);
-        await handleCreateNote(currentFolder, name, template);
+        await handleCreateNote(currentFolder, name, template, answers);
       },
     });
   }, [currentFolder, handleCreateNote]);

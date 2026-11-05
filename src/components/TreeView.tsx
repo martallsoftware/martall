@@ -40,7 +40,12 @@ interface Props {
   nodes: TreeNode[];
   selectedPath: string | null;
   onSelectNote: (path: string) => void;
-  onCreateNote: (parentDir: string, name: string, template?: string) => Promise<void>;
+  onCreateNote: (
+    parentDir: string,
+    name: string,
+    template?: string,
+    answers?: Record<string, string>,
+  ) => Promise<void>;
   onCreateFolder: (path: string) => Promise<void>;
   onRename: (path: string, newName: string) => Promise<void>;
   onDelete: (path: string) => Promise<void>;
@@ -187,7 +192,7 @@ type DialogState =
       title: string;
       placeholder: string;
       withTemplates?: boolean;
-      onConfirm: (val: string, template?: string) => void;
+      onConfirm: (val: string, template?: string, answers?: Record<string, string>) => void;
     }
   | { type: "confirm"; title: string; message: string; onConfirm: () => void }
   | { type: "move"; sourcePath: string; sourceName: string };
@@ -271,9 +276,9 @@ export default function TreeView({
               title: "New Note",
               placeholder: "Note name",
               withTemplates: true,
-              onConfirm: async (name, template) => {
+              onConfirm: async (name, template, answers) => {
                 setDialog(null);
-                await onCreateNote(rootDir, name, template);
+                await onCreateNote(rootDir, name, template, answers);
               },
             });
           },
@@ -309,9 +314,9 @@ export default function TreeView({
               title: "New Note",
               placeholder: "Note name",
               withTemplates: true,
-              onConfirm: async (name, template) => {
+              onConfirm: async (name, template, answers) => {
                 setDialog(null);
-                await onCreateNote(node.path, name, template);
+                await onCreateNote(node.path, name, template, answers);
                 setExpandedPaths((prev) => new Set(prev).add(node.path));
               },
             });

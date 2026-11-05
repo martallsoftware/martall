@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { TagGraph } from "../types";
 
@@ -229,28 +229,59 @@ export default function GraphView({ onSelectNote, darkMode }: Props) {
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
   useEffect(() => { viewBoxRef.current = viewBox; }, [viewBox]);
 
-  // Zoom
+  // Bounding box of all nodes (with padding) — used for fit-to-view, zoom limits and the minimap.
+  const bounds = useMemo(() => {
+    if (nodes.length === 0) return { x: 0, y: 0, w: 800, h: 600 };
+    const pad = 80;
+    const minX = Math.min(...nodes.map((n) => n.x)) - pad;
+    const minY = Math.min(...nodes.map((n) => n.y)) - pad;
+    const maxX = Math.max(...nodes.map((n) => n.x)) + pad;
+    const maxY = Math.max(...nodes.map((n) => n.y)) + pad;
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  }, [nodes]);
+  const boundsRef = useRef(bounds);
+  useEffect(() => { boundsRef.current = bounds; }, [bounds]);
+
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const scheduleSave = useCallback((vb: { x: number; y: number; w: number; h: number }) => {
+    clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => saveLayout(nodesRef.current, vb), 300);
+  }, []);
+  useEffect(() => () => clearTimeout(saveTimerRef.current), []);
+
+  /** Zoom by `factor` (<1 = in) keeping the SVG point (px, py) fixed; defaults to the view centre. */
+  const zoomBy = useCallback((factor: number, px?: number, py?: number) => {
+    setViewBox((v) => {
+      const b = boundsRef.current;
+      const maxW = Math.max(b.w, b.h * (v.w / v.h)) * 4;
+      const nw = Math.min(Math.max(v.w * factor, 60), maxW);
+      const f = nw / v.w;
+      const cx = px ?? v.x + v.w / 2;
+      const cy = py ?? v.y + v.h / 2;
+      const newVb = { x: cx - (cx - v.x) * f, y: cy - (cy - v.y) * f, w: nw, h: v.h * f };
+      scheduleSave(newVb);
+      return newVb;
+    });
+  }, [scheduleSave]);
+
+  // Scroll-wheel / trackpad-pinch zoom towards the cursor.
+  // Depends on hasNodes: the <svg> only exists once the graph has loaded.
+  const hasNodes = nodes.length > 0;
   useEffect(() => {
     const svg = svgRef.current;
     if (!svg) return;
-    let saveTimer: ReturnType<typeof setTimeout>;
     const handler = (e: WheelEvent) => {
       e.preventDefault();
-      const scale = e.deltaY > 0 ? 1.1 : 0.9;
-      setViewBox((v) => {
-        const cx = v.x + v.w / 2;
-        const cy = v.y + v.h / 2;
-        const nw = v.w * scale;
-        const nh = v.h * scale;
-        const newVb = { x: cx - nw / 2, y: cy - nh / 2, w: nw, h: nh };
-        clearTimeout(saveTimer);
-        saveTimer = setTimeout(() => saveLayout(nodesRef.current, newVb), 300);
-        return newVb;
-      });
+      const rect = svg.getBoundingClientRect();
+      const vb = viewBoxRef.current;
+      const px = vb.x + ((e.clientX - rect.left) / rect.width) * vb.w;
+      const py = vb.y + ((e.clientY - rect.top) / rect.height) * vb.h;
+      const delta = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+      zoomBy(Math.exp(delta * (e.ctrlKey ? 0.01 : 0.002)), px, py);
     };
     svg.addEventListener("wheel", handler, { passive: false });
-    return () => { svg.removeEventListener("wheel", handler); clearTimeout(saveTimer); };
-  }, []);
+    return () => svg.removeEventListener("wheel", handler);
+  }, [hasNodes, zoomBy]);
 
   // screenToSvg using ref to avoid stale closures
   const screenToSvgRef = useCallback(
@@ -350,29 +381,31 @@ export default function GraphView({ onSelectNote, darkMode }: Props) {
     [nodes, viewBox],
   );
 
-  const zoomIn = useCallback(() => {
-    setViewBox((v) => {
-      const cx = v.x + v.w / 2;
-      const cy = v.y + v.h / 2;
-      const nw = v.w * 0.8;
-      const nh = v.h * 0.8;
-      const newVb = { x: cx - nw / 2, y: cy - nh / 2, w: nw, h: nh };
-      saveLayout(nodesRef.current, newVb);
-      return newVb;
-    });
+  const zoomIn = useCallback(() => zoomBy(0.8), [zoomBy]);
+  const zoomOut = useCallback(() => zoomBy(1.25), [zoomBy]);
+
+  /** Fit all nodes into the view, keeping the screen's aspect ratio. */
+  const fitView = useCallback(() => {
+    const svg = svgRef.current;
+    const b = boundsRef.current;
+    const rect = svg?.getBoundingClientRect();
+    const aspect = rect && rect.height > 0 ? rect.width / rect.height : b.w / b.h;
+    let w = b.w, h = b.h;
+    if (w / h < aspect) w = h * aspect; else h = w / aspect;
+    const newVb = { x: b.x + b.w / 2 - w / 2, y: b.y + b.h / 2 - h / 2, w, h };
+    setViewBox(newVb);
+    saveLayout(nodesRef.current, newVb);
   }, []);
 
-  const zoomOut = useCallback(() => {
-    setViewBox((v) => {
-      const cx = v.x + v.w / 2;
-      const cy = v.y + v.h / 2;
-      const nw = v.w * 1.25;
-      const nh = v.h * 1.25;
-      const newVb = { x: cx - nw / 2, y: cy - nh / 2, w: nw, h: nh };
-      saveLayout(nodesRef.current, newVb);
-      return newVb;
+  const [showMinimap, setShowMinimap] = useState(() => {
+    try { return localStorage.getItem("martall_graph_minimap") !== "0"; } catch { return true; }
+  });
+  const toggleMinimap = () => {
+    setShowMinimap((v) => {
+      try { localStorage.setItem("martall_graph_minimap", v ? "0" : "1"); } catch { /* ignore */ }
+      return !v;
     });
-  }, []);
+  };
 
   const tagColor = "#22C55E";
   const noteColor = darkMode ? "#8B8B9E" : "#6B7280";
@@ -447,6 +480,12 @@ export default function GraphView({ onSelectNote, darkMode }: Props) {
         </button>
         <button onClick={zoomOut} className="p-2 rounded-lg bg-gray-200/80 dark:bg-gray-700/80 hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors" title="Zoom out">
           <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M5 10h10" /></svg>
+        </button>
+        <button onClick={fitView} className="p-2 rounded-lg bg-gray-200/80 dark:bg-gray-700/80 hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors" title="Fit all nodes">
+          <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4" /></svg>
+        </button>
+        <button onClick={toggleMinimap} className={`p-2 rounded-lg transition-colors ${showMinimap ? "bg-accent/20 text-accent" : "bg-gray-200/80 dark:bg-gray-700/80"} hover:bg-gray-300 dark:hover:bg-gray-600`} title="Toggle overview map">
+          <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"><rect x="2.5" y="3.5" width="15" height="13" rx="1.5" /><rect x="10" y="10" width="5" height="4" /></svg>
         </button>
         <button onClick={refresh} className="p-2 rounded-lg bg-gray-200/80 dark:bg-gray-700/80 hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors" title="Refresh">
           <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 10a7 7 0 0113.4-2.8M17 10a7 7 0 01-13.4 2.8" /><path d="M3 4v4h4M17 16v-4h-4" /></svg>
@@ -546,6 +585,30 @@ export default function GraphView({ onSelectNote, darkMode }: Props) {
         })}
       </svg>
 
+      {/* Zoom level */}
+      <div className="absolute bottom-3 left-3 z-10 text-[10px] text-gray-400 select-none pointer-events-none">
+        {Math.round((bounds.w / viewBox.w) * 100)}%
+      </div>
+
+      {/* Overview minimap */}
+      {showMinimap && (
+        <Minimap
+          nodes={nodes}
+          edges={edges}
+          bounds={bounds}
+          viewBox={viewBox}
+          darkMode={darkMode}
+          onCenter={(x, y) =>
+            setViewBox((v) => {
+              const newVb = { ...v, x: x - v.w / 2, y: y - v.h / 2 };
+              scheduleSave(newVb);
+              return newVb;
+            })
+          }
+          onZoom={(factor, x, y) => zoomBy(factor, x, y)}
+        />
+      )}
+
       {/* Note Preview Panel */}
       {preview && (
         <div
@@ -600,6 +663,116 @@ export default function GraphView({ onSelectNote, darkMode }: Props) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+interface MinimapProps {
+  nodes: Node[];
+  edges: Edge[];
+  bounds: { x: number; y: number; w: number; h: number };
+  viewBox: { x: number; y: number; w: number; h: number };
+  darkMode: boolean;
+  onCenter: (x: number, y: number) => void;
+  onZoom: (factor: number, x: number, y: number) => void;
+}
+
+/** Small overview of the whole graph; click or drag to move the view, scroll to zoom. */
+function Minimap({ nodes, edges, bounds, viewBox, darkMode, onCenter, onZoom }: MinimapProps) {
+  const ref = useRef<SVGSVGElement>(null);
+  const dragging = useRef(false);
+  const W = 180, H = 130;
+
+  // Show both the graph and the current view, so the view rectangle never leaves the map.
+  const minX = Math.min(bounds.x, viewBox.x);
+  const minY = Math.min(bounds.y, viewBox.y);
+  const maxX = Math.max(bounds.x + bounds.w, viewBox.x + viewBox.w);
+  const maxY = Math.max(bounds.y + bounds.h, viewBox.y + viewBox.h);
+  let w = maxX - minX, h = maxY - minY;
+  if (w / h < W / H) w = h * (W / H); else h = w / (W / H);
+  const area = { x: (minX + maxX) / 2 - w / 2, y: (minY + maxY) / 2 - h / 2, w, h };
+  const unit = area.w / W; // graph units per minimap pixel
+
+  const toGraph = (clientX: number, clientY: number) => {
+    const rect = ref.current!.getBoundingClientRect();
+    return {
+      x: area.x + ((clientX - rect.left) / rect.width) * area.w,
+      y: area.y + ((clientY - rect.top) / rect.height) * area.h,
+    };
+  };
+
+  useEffect(() => {
+    const svg = ref.current;
+    if (!svg) return;
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const delta = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+      onZoom(Math.exp(delta * (e.ctrlKey ? 0.01 : 0.002)), viewBox.x + viewBox.w / 2, viewBox.y + viewBox.h / 2);
+    };
+    svg.addEventListener("wheel", handler, { passive: false });
+    return () => svg.removeEventListener("wheel", handler);
+  }, [onZoom, viewBox]);
+
+  return (
+    <div
+      className="absolute bottom-3 right-3 z-10 rounded-lg border overflow-hidden shadow-lg"
+      style={{
+        backgroundColor: darkMode ? "rgba(22,22,42,0.9)" : "rgba(255,255,255,0.9)",
+        borderColor: darkMode ? "#333355" : "#D1D5DB",
+      }}
+    >
+      <svg
+        ref={ref}
+        width={W}
+        height={H}
+        viewBox={`${area.x} ${area.y} ${area.w} ${area.h}`}
+        className="block cursor-pointer"
+        onMouseDown={(e) => {
+          if (e.button !== 0) return;
+          e.stopPropagation();
+          dragging.current = true;
+          const p = toGraph(e.clientX, e.clientY);
+          onCenter(p.x, p.y);
+        }}
+        onMouseMove={(e) => {
+          if (!dragging.current) return;
+          const p = toGraph(e.clientX, e.clientY);
+          onCenter(p.x, p.y);
+        }}
+        onMouseUp={() => { dragging.current = false; }}
+        onMouseLeave={() => { dragging.current = false; }}
+      >
+        {edges.map((e, i) => (
+          <line
+            key={i}
+            x1={nodes[e.source].x}
+            y1={nodes[e.source].y}
+            x2={nodes[e.target].x}
+            y2={nodes[e.target].y}
+            stroke={darkMode ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.12)"}
+            strokeWidth={unit * 0.6}
+          />
+        ))}
+        {nodes.map((n) => (
+          <circle
+            key={n.id}
+            cx={n.x}
+            cy={n.y}
+            r={unit * (n.type === "tag" ? 3 : 1.6)}
+            fill={n.type === "tag" ? "#22C55E" : darkMode ? "#8B8B9E" : "#6B7280"}
+          />
+        ))}
+        <rect
+          x={viewBox.x}
+          y={viewBox.y}
+          width={viewBox.w}
+          height={viewBox.h}
+          fill="rgba(34,197,94,0.08)"
+          stroke="#22C55E"
+          strokeWidth={unit * 1.5}
+        />
+      </svg>
     </div>
   );
 }

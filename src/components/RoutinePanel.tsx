@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ChartView from "./ChartView";
 import {
+  activityGrid,
+  currentStreak,
   finishSession,
   parseLog,
   routineTasks,
@@ -91,12 +93,36 @@ export function RoutineHistory({ content, dark }: { content: string; dark: boole
   const log = useMemo(() => parseLog(content), [content]);
   const sessions = useMemo(() => sessionsChart(log), [log]);
   const weights = useMemo(() => weightChart(log), [log]);
+  const grid = useMemo(() => activityGrid(log), [log]);
+  const streak = useMemo(() => currentStreak(log), [log]);
   if (log.length === 0) return null;
 
   return (
     <div className="mt-8 pt-4 border-t border-gray-300/40 dark:border-gray-700/40">
       <div className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-3">
         History · {log.length} session{log.length === 1 ? "" : "s"} · last {log[log.length - 1].date}
+        {streak > 1 && <> · 🔥 {streak}-day streak</>}
+      </div>
+      <div className="flex gap-[3px] mb-6" title="Last 16 weeks (Monday at the top)">
+        {grid.map((col, i) => (
+          <div key={i} className="flex flex-col gap-[3px]">
+            {col.map((cell) => (
+              <div
+                key={cell.date}
+                title={cell.label}
+                className={
+                  "w-3 h-3 rounded-sm " +
+                  (cell.ratio === null
+                    ? "bg-transparent"
+                    : cell.ratio === 0
+                      ? "bg-gray-300/40 dark:bg-gray-700/50"
+                      : "bg-accent")
+                }
+                style={cell.ratio ? { opacity: 0.35 + 0.65 * cell.ratio } : undefined}
+              />
+            ))}
+          </div>
+        ))}
       </div>
       <div className="grid gap-6">
         <ChartView spec={sessions} dark={dark} />

@@ -31,7 +31,7 @@ export function isRoutineNote(content: string): boolean {
   return ROUTINE_TAG_RE.test(content.replace(/```[\s\S]*?```/g, ""));
 }
 
-function logHeadingIndex(lines: string[]): number {
+export function logHeadingIndex(lines: string[]): number {
   return lines.findIndex((l) => LOG_HEADING_RE.test(l));
 }
 
@@ -50,10 +50,13 @@ export function routineTasks(content: string): RoutineTask[] {
   return tasks;
 }
 
-export function todayIso(): string {
-  const d = new Date();
+function isoOf(d: Date): string {
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+export function todayIso(): string {
+  return isoOf(new Date());
 }
 
 /**
@@ -182,8 +185,58 @@ export function sessionsChart(log: LogEntry[], weeks = 12): ChartSpec {
   }
   return {
     kind: "bar",
+    integer: true,
     title: "Sessions per week",
     labels: starts.map((d) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" })),
     series: [{ name: "Sessions", data: counts }],
   };
+}
+
+export interface DayCell {
+  date: string;
+  /** Best done/total that day; 0 = no session; null = in the future. */
+  ratio: number | null;
+  label: string;
+}
+
+/** Calendar grid for the last `weeks` weeks: one column per week, Monday first. */
+export function activityGrid(log: LogEntry[], weeks = 16): DayCell[][] {
+  const best = new Map<string, LogEntry>();
+  for (const e of log) {
+    const prev = best.get(e.date);
+    if (!prev || e.done / e.total > prev.done / prev.total) best.set(e.date, e);
+  }
+  const today = todayIso();
+  const start = weekStart(today);
+  start.setDate(start.getDate() - (weeks - 1) * 7);
+  const columns: DayCell[][] = [];
+  for (let w = 0; w < weeks; w++) {
+    const col: DayCell[] = [];
+    for (let d = 0; d < 7; d++) {
+      const day = new Date(start);
+      day.setDate(start.getDate() + w * 7 + d);
+      const date = isoOf(day);
+      const e = best.get(date);
+      col.push({
+        date,
+        ratio: date > today ? null : e ? e.done / Math.max(e.total, 1) : 0,
+        label: e ? `${date} — ${e.done}/${e.total}` : date,
+      });
+    }
+    columns.push(col);
+  }
+  return columns;
+}
+
+/** Consecutive days with a session, ending today (or yesterday if today has none yet). */
+export function currentStreak(log: LogEntry[]): number {
+  const days = new Set(log.map((e) => e.date));
+  const d = new Date(todayIso() + "T00:00:00");
+  if (!days.has(isoOf(d))) d.setDate(d.getDate() - 1);
+  let streak = 0;
+  while (days.has(isoOf(d))) {
+    streak++;
+    d.setDate(d.getDate() - 1);
+  }
+  return streak;
 }

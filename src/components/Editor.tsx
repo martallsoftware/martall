@@ -3,6 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import EmojiPicker from "./EmojiPicker";
 import TableDialog from "./TableDialog";
 import FlowchartDialog from "./FlowchartDialog";
+import TaskDialog from "./TaskDialog";
+import { applyTaskEdit, taskForLine, type Task } from "../utils/task";
+import { todayIso } from "../utils/routine";
 import { cleanToMarkdown } from "../utils/cleanToMarkdown";
 import type { NoteInfo } from "../types";
 
@@ -86,6 +89,34 @@ function EditorImpl({ content, onChange, notePath }: Props, ref: React.Ref<Edito
   const [showEmoji, setShowEmoji] = useState(false);
   const [showTable, setShowTable] = useState(false);
   const [showFlowchart, setShowFlowchart] = useState(false);
+  const [taskEdit, setTaskEdit] = useState<{ line: number; task: Task; isNew: boolean } | null>(null);
+
+  /** Open the task dialog for the line under the caret (Cmd/Ctrl+Shift+T). */
+  const openTaskDialog = useCallback(() => {
+    const ta = textareaRef.current;
+    const caret = ta?.selectionStart ?? contentRef.current.length;
+    const line = contentRef.current.slice(0, caret).split("\n").length - 1;
+    const text = contentRef.current.split("\n")[line] ?? "";
+    setTaskEdit({ line, ...taskForLine(text, todayIso()) });
+  }, []);
+
+  const applyTask = useCallback(
+    (task: Task) => {
+      if (!taskEdit) return;
+      const next = applyTaskEdit(
+        contentRef.current,
+        taskEdit.line,
+        taskEdit.isNew ? null : taskEdit.task,
+        task,
+        todayIso(),
+      );
+      contentRef.current = next;
+      onChange(next);
+      setTaskEdit(null);
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    },
+    [taskEdit, onChange],
+  );
 
   // Wiki-link autocomplete
   const [allNotes, setAllNotes] = useState<NoteInfo[]>([]);
@@ -196,6 +227,11 @@ function EditorImpl({ content, onChange, notePath }: Props, ref: React.Ref<Edito
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "t") {
+        e.preventDefault();
+        openTaskDialog();
+        return;
+      }
       // Wiki autocomplete keyboard handling takes priority while the popup is open
       if (suggest && suggestions.length > 0) {
         if (e.key === "ArrowDown") {
@@ -233,7 +269,7 @@ function EditorImpl({ content, onChange, notePath }: Props, ref: React.Ref<Edito
         });
       }
     },
-    [content, onChange, suggest, suggestions, suggestIndex, acceptSuggestion],
+    [content, onChange, suggest, suggestions, suggestIndex, acceptSuggestion, openTaskDialog],
   );
 
   return (
@@ -282,8 +318,32 @@ function EditorImpl({ content, onChange, notePath }: Props, ref: React.Ref<Edito
         </div>
       )}
 
+      {taskEdit && (
+        <TaskDialog
+          initial={taskEdit.task}
+          isNew={taskEdit.isNew}
+          onApply={applyTask}
+          onCancel={() => {
+            setTaskEdit(null);
+            requestAnimationFrame(() => textareaRef.current?.focus());
+          }}
+        />
+      )}
+
       {/* Toolbar */}
       <div className="absolute bottom-2 right-3 flex items-center gap-1 px-2 py-1 rounded-xl border border-gray-200/80 dark:border-gray-700/60 bg-white/90 dark:bg-[#1e1e2e]/90 backdrop-blur-sm shadow-lg">
+        {/* Task button */}
+        <button
+          onClick={openTaskDialog}
+          className="p-1.5 rounded-lg transition-colors text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
+          title="Create or edit task on this line (⌘/Ctrl+Shift+T)"
+        >
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="2" y="2" width="14" height="14" rx="3" />
+            <path d="M5.5 9.5l2.5 2.5 4.5-5.5" />
+          </svg>
+        </button>
+
         {/* Clean/Format button */}
         <button
           onClick={() => {

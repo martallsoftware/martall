@@ -7,7 +7,12 @@ import MermaidBlock from "./MermaidBlock";
 import LuaLiveBlock from "./LuaLiveBlock";
 import ContextMenu, { type MenuItem } from "./ContextMenu";
 import { RoutineBar, RoutineHistory } from "./RoutinePanel";
+import { MetricsBar, MetricsHistory } from "./MetricsPanel";
 import { isRoutineNote } from "../utils/routine";
+import { isMetricsNote } from "../utils/metrics";
+import TaskDialog from "./TaskDialog";
+import { applyTaskEdit, parseTaskLine, toggleTaskDone, type Task } from "../utils/task";
+import { todayIso } from "../utils/routine";
 import type { NoteInfo } from "../types";
 
 interface Props {
@@ -396,13 +401,30 @@ function DueDatePill({ date }: { date: string }) {
   );
 }
 
+const TASK_MARK_TITLES: Record<string, string> = {
+  "⏳": "Scheduled", "🛫": "Start", "➕": "Created", "✅": "Done", "❌": "Cancelled", "🔁": "Recurs",
+};
+
+/** Muted pill for the other task markers (⏳ 🛫 ➕ ✅ ❌ dates and 🔁 rules). */
+function TaskMarkPill({ emoji, text }: { emoji: string; text: string }) {
+  return (
+    <span
+      className="inline-flex items-center gap-0.5 px-1.5 py-0 text-[0.8em] rounded-full mx-0.5 bg-gray-500/15 text-gray-500 dark:text-gray-400"
+      title={`${TASK_MARK_TITLES[emoji] ?? ""} ${text}`.trim()}
+    >
+      <span>{emoji}</span>
+      <span>{text}</span>
+    </span>
+  );
+}
+
 /** Renders #tags as styled pills and 📅 YYYY-MM-DD as colored due-date pills. */
 function renderWithTags(children: React.ReactNode): React.ReactNode {
   if (typeof children === "string") {
     // Single splitter that captures either a tag (with optional leading whitespace)
     // or a `📅 YYYY-MM-DD` marker.
     const parts = children.split(
-      /((?:^|(?<=\s))#\p{L}[\p{L}\p{N}_/-]*|📅\s*\d{4}-\d{2}-\d{2})/gu,
+      /((?:^|(?<=\s))#\p{L}[\p{L}\p{N}_/-]*|📅\s*\d{4}-\d{2}-\d{2}|(?:⏳|🛫|➕|✅|❌)\uFE0F?\s*\d{4}-\d{2}-\d{2}|🔁\uFE0F?\s*every\b[^📅⏳🛫➕✅❌🔺⏫🔼🔽⏬#]*)/gu,
     );
     if (parts.length === 1) return children;
     return parts.map((part, i) => {
@@ -419,6 +441,10 @@ function renderWithTags(children: React.ReactNode): React.ReactNode {
       const dueMatch = part.match(/^📅\s*(\d{4}-\d{2}-\d{2})$/);
       if (dueMatch) {
         return <DueDatePill key={i} date={dueMatch[1]} />;
+      }
+      const markMatch = part.match(/^(⏳|🛫|➕|✅|❌|🔁)\uFE0F?\s*(.+?)\s*$/u);
+      if (markMatch) {
+        return <TaskMarkPill key={i} emoji={markMatch[1]} text={markMatch[2]} />;
       }
       // Check if part starts with whitespace + #tag (lookbehind matched \s)
       const wsMatch = part.match(/^(\s+)(#\p{L}[\p{L}\p{N}_/-]*)$/u);
@@ -525,15 +551,34 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
   // Extract wiki targets from the (debounced) content and batch-resolve them
   // to absolute paths so the renderer can mark broken links and route clicks.
   const isRoutine = useMemo(() => isRoutineNote(content), [content]);
+  const isMetrics = useMemo(() => isMetricsNote(content), [content]);
 
-  const handleToggleTask = (lineIdx: number) => {
+  const commitContent = (next: string) => {
     if (!onContentChange) return;
-    const next = toggleTaskLine(content, lineIdx);
-    if (next === null) return;
-    // Skip the debounce so the checkbox flips immediately.
+    // Skip the debounce so the change shows immediately.
     if (timerRef.current) clearTimeout(timerRef.current);
     setDebouncedContent(fixImagePaths(next));
     onContentChange(next);
+  };
+
+  const handleToggleTask = (lineIdx: number) => {
+    if (!onContentChange) return;
+    // Routines just flip the box; Finish session does the logging.
+    if (isRoutine) {
+      const next = toggleTaskLine(content, lineIdx);
+      if (next !== null) commitContent(next);
+      return;
+    }
+    const lines = content.split("\n");
+    if (!parseTaskLine(lines[lineIdx] ?? "")) return;
+    lines.splice(lineIdx, 1, ...toggleTaskDone(lines[lineIdx], todayIso()));
+    commitContent(lines.join("\n"));
+  };
+
+  const [taskEdit, setTaskEdit] = useState<{ line: number; task: Task } | null>(null);
+  const openTaskEdit = (lineIdx: number) => {
+    const task = parseTaskLine(content.split("\n")[lineIdx] ?? "");
+    if (task) setTaskEdit({ line: lineIdx, task });
   };
 
   const wikiTargets = useMemo(() => extractWikiTargets(debouncedContent), [debouncedContent]);
@@ -585,6 +630,7 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
       {isRoutine && (
         <RoutineBar content={content} notePath={notePath} onContentChange={onContentChange} />
       )}
+      {isMetrics && <MetricsBar content={content} onContentChange={onContentChange} />}
       <div ref={contentRef} className="markdown-body text-gray-800 dark:text-gray-200 max-w-none">
         <Markdown
           remarkPlugins={[remarkGfm, remarkWikiLinks]}
@@ -687,7 +733,7 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
                 const lineIdx = (node?.position?.start.line ?? 0) - 1;
                 return (
                   <li
-                    className={className}
+                    className={className + " group relative"}
                     onClick={(e) => {
                       // Only the item's own checkbox; nested items handle theirs.
                       if ((e.target as HTMLElement).classList.contains("task-checkbox")) {
@@ -697,6 +743,18 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
                     }}
                   >
                     {renderWithTags(children)}
+                    {onContentChange && !isRoutine && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openTaskEdit(lineIdx);
+                        }}
+                        className="task-edit-btn absolute right-0 top-0 px-1.5 text-xs rounded opacity-0 group-hover:opacity-100 text-gray-400 hover:text-accent hover:bg-gray-200 dark:hover:bg-gray-700 transition-opacity"
+                        title="Edit task"
+                      >
+                        ✎
+                      </button>
+                    )}
                   </li>
                 );
               }
@@ -728,6 +786,7 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
         </Markdown>
       </div>
       {isRoutine && <RoutineHistory content={debouncedContent} dark={darkMode} />}
+      {isMetrics && <MetricsHistory content={debouncedContent} dark={darkMode} />}
       {notePath && backlinks.length > 0 && (
         <div className="mt-8 pt-4 border-t border-gray-300/40 dark:border-gray-700/40">
           <div className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
@@ -746,6 +805,17 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
             ))}
           </ul>
         </div>
+      )}
+      {taskEdit && (
+        <TaskDialog
+          initial={taskEdit.task}
+          isNew={false}
+          onApply={(task) => {
+            commitContent(applyTaskEdit(content, taskEdit.line, taskEdit.task, task, todayIso()));
+            setTaskEdit(null);
+          }}
+          onCancel={() => setTaskEdit(null)}
+        />
       )}
       {menu && (
         <ContextMenu

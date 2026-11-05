@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import TaskStats from "./TaskStats";
+import { parseTaskLine, PRIORITY_EMOJI, PRIORITY_RANK, type Task } from "../utils/task";
 
 export interface TaskItem {
   note_path: string;
@@ -42,6 +44,18 @@ function bucketFor(task: TaskItem): Bucket {
   return "Later";
 }
 
+const detailsCache = new Map<string, Task>();
+
+/** Priority, recurrence and clean description from the indexed task text. */
+function details(t: TaskItem): Task {
+  let d = detailsCache.get(t.text);
+  if (!d) {
+    d = parseTaskLine(`- [ ] ${t.text}`)!;
+    detailsCache.set(t.text, d);
+  }
+  return d;
+}
+
 const BUCKET_ORDER: Bucket[] = ["Overdue", "Today", "Tomorrow", "This week", "Later", "Done"];
 
 const BUCKET_COLOR: Record<Bucket, string> = {
@@ -56,6 +70,23 @@ const BUCKET_COLOR: Record<Bucket, string> = {
 export default function TasksPanel({ onSelectNote, refreshKey }: Props) {
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [showDone, setShowDone] = useState(false);
+  const [showCharts, setShowCharts] = useState(() => {
+    try {
+      return localStorage.getItem("tasks.showCharts") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleCharts = () => {
+    setShowCharts((v) => {
+      try {
+        localStorage.setItem("tasks.showCharts", v ? "0" : "1");
+      } catch {
+        // per-viewer convenience only
+      }
+      return !v;
+    });
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -72,6 +103,14 @@ export default function TasksPanel({ onSelectNote, refreshKey }: Props) {
     for (const t of tasks) {
       map[bucketFor(t)].push(t);
     }
+    // Within a bucket: earlier due date first, then higher priority.
+    for (const b of BUCKET_ORDER) {
+      map[b].sort(
+        (a, c) =>
+          a.due_date.localeCompare(c.due_date) ||
+          PRIORITY_RANK[details(c).priority] - PRIORITY_RANK[details(a).priority],
+      );
+    }
     return map;
   }, [tasks]);
 
@@ -83,6 +122,16 @@ export default function TasksPanel({ onSelectNote, refreshKey }: Props) {
         <span className="text-xs font-semibold uppercase tracking-wider text-gray-400">
           Tasks {total > 0 && <span className="text-gray-500 normal-case font-normal ml-1">({total} open)</span>}
         </span>
+        <div className="flex items-center gap-2">
+        <button
+          onClick={toggleCharts}
+          className={`px-1 rounded text-[13px] transition-colors ${
+            showCharts ? "bg-accent/15" : "opacity-60 hover:opacity-100"
+          }`}
+          title={showCharts ? "Hide charts" : "Show charts"}
+        >
+          📊
+        </button>
         <label className="flex items-center gap-1.5 text-[11px] text-gray-400 cursor-pointer">
           <input
             type="checkbox"
@@ -92,7 +141,14 @@ export default function TasksPanel({ onSelectNote, refreshKey }: Props) {
           />
           Done
         </label>
+        </div>
       </div>
+
+      {showCharts && (
+        <div className="max-h-[60%] overflow-y-auto shrink-0">
+          <TaskStats refreshKey={refreshKey} />
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto">
         {tasks.length === 0 ? (
@@ -119,7 +175,15 @@ export default function TasksPanel({ onSelectNote, refreshKey }: Props) {
                     title={t.note_title}
                   >
                     <div className={`text-sm truncate ${t.done ? "line-through text-gray-400" : "text-gray-800 dark:text-gray-200"}`}>
-                      {t.text || "(no description)"}
+                      {PRIORITY_EMOJI[details(t).priority] && (
+                        <span className="mr-1" title={`${details(t).priority} priority`}>
+                          {PRIORITY_EMOJI[details(t).priority]}
+                        </span>
+                      )}
+                      {details(t).description || "(no description)"}
+                      {details(t).recurrence && (
+                        <span className="ml-1 text-gray-400" title={details(t).recurrence}>🔁</span>
+                      )}
                     </div>
                     <div className="text-[10px] text-gray-400 truncate flex items-center gap-1.5">
                       <span>{t.due_date}</span>
