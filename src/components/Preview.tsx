@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useRef } from "react";
+import { lazy, Suspense, useMemo, useState, useEffect, useRef } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { invoke } from "@tauri-apps/api/core";
@@ -6,19 +6,49 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import MermaidBlock from "./MermaidBlock";
 import LuaLiveBlock from "./LuaLiveBlock";
 import ContextMenu, { type MenuItem } from "./ContextMenu";
+import { RoutineBar, RoutineHistory } from "./RoutinePanel";
+import { MetricsBar, MetricsHistory } from "./MetricsPanel";
+import { isRoutineNote } from "../utils/routine";
+import { isMetricsNote } from "../utils/metrics";
+import TaskDialog from "./TaskDialog";
+import { applyTaskEdit, parseTaskLine, toggleTaskDone, type Task } from "../utils/task";
+import { todayIso } from "../utils/routine";
 import type { NoteInfo } from "../types";
+import { isDrawingPath } from "../utils/drawing";
+
+// Excalidraw is large; only load it when a note embeds a drawing.
+const DrawingEmbed = lazy(() => import("./DrawingEmbed"));
 
 interface Props {
   content: string;
   notePath: string | null;
   darkMode?: boolean;
   onOpenNote?: (path: string) => void;
+  /** When set, task checkboxes are clickable and write the toggled markdown back. */
+  onContentChange?: (content: string) => void;
+  /** When set, mermaid blocks get an "Edit as drawing" button. */
+  onMermaidToDrawing?: (code: string) => Promise<void>;
+}
+
+/** `- [ ] text` / `1. [x] text` (optionally inside a blockquote). Groups: prefix, mark. */
+const TASK_LINE_RE = /^(\s*(?:>\s*)*(?:[-*+]|\d+[.)])\s+\[)([ xX])\]/;
+
+/** Flip the checkbox on 0-based `lineIdx`; returns null if that line isn't a task. */
+function toggleTaskLine(md: string, lineIdx: number): string | null {
+  const lines = md.split("\n");
+  const line = lines[lineIdx];
+  if (line === undefined || !TASK_LINE_RE.test(line)) return null;
+  lines[lineIdx] = line.replace(TASK_LINE_RE, (_m, prefix: string, mark: string) =>
+    `${prefix}${mark === " " ? "x" : " "}]`,
+  );
+  return lines.join("\n");
 }
 
 /**
  * Remark plugin: rewrites `[[Target]]` and `[[Target|Display]]` text spans
  * into link nodes with `url = "wiki:<target>"`. The `a` component handler
  * below detects the `wiki:` prefix and routes the click through `onOpenNote`.
+ * `![[Target]]` becomes `wikiembed:<target>` (rendered inline for drawings).
  * Nodes without `children` (code, inlineCode) are untouched.
  */
 const WIKI_LINK_RE = /\[\[([^\]\n]+?)\]\]/g;
@@ -39,8 +69,10 @@ function remarkWikiLinks() {
         let m: RegExpExecArray | null;
         while ((m = WIKI_LINK_RE.exec(text)) !== null) {
           matched = true;
-          if (m.index > last) {
-            out.push({ type: "text", value: text.slice(last, m.index) });
+          const embed = m.index > last && text[m.index - 1] === "!";
+          const before = text.slice(last, embed ? m.index - 1 : m.index);
+          if (before) {
+            out.push({ type: "text", value: before });
           }
           const raw = m[1];
           const pipe = raw.indexOf("|");
@@ -48,7 +80,7 @@ function remarkWikiLinks() {
           const display = (pipe >= 0 ? raw.slice(pipe + 1) : raw).trim();
           out.push({
             type: "link",
-            url: "wiki:" + target,
+            url: (embed ? "wikiembed:" : "wiki:") + target,
             title: null,
             children: [{ type: "text", value: display }],
           });
@@ -378,13 +410,30 @@ function DueDatePill({ date }: { date: string }) {
   );
 }
 
+const TASK_MARK_TITLES: Record<string, string> = {
+  "⏳": "Scheduled", "🛫": "Start", "➕": "Created", "✅": "Done", "❌": "Cancelled", "🔁": "Recurs",
+};
+
+/** Muted pill for the other task markers (⏳ 🛫 ➕ ✅ ❌ dates and 🔁 rules). */
+function TaskMarkPill({ emoji, text }: { emoji: string; text: string }) {
+  return (
+    <span
+      className="inline-flex items-center gap-0.5 px-1.5 py-0 text-[0.8em] rounded-full mx-0.5 bg-gray-500/15 text-gray-500 dark:text-gray-400"
+      title={`${TASK_MARK_TITLES[emoji] ?? ""} ${text}`.trim()}
+    >
+      <span>{emoji}</span>
+      <span>{text}</span>
+    </span>
+  );
+}
+
 /** Renders #tags as styled pills and 📅 YYYY-MM-DD as colored due-date pills. */
 function renderWithTags(children: React.ReactNode): React.ReactNode {
   if (typeof children === "string") {
     // Single splitter that captures either a tag (with optional leading whitespace)
     // or a `📅 YYYY-MM-DD` marker.
     const parts = children.split(
-      /((?:^|(?<=\s))#\p{L}[\p{L}\p{N}_/-]*|📅\s*\d{4}-\d{2}-\d{2})/gu,
+      /((?:^|(?<=\s))#\p{L}[\p{L}\p{N}_/-]*|📅\s*\d{4}-\d{2}-\d{2}|(?:⏳|🛫|➕|✅|❌)\uFE0F?\s*\d{4}-\d{2}-\d{2}|🔁\uFE0F?\s*every\b[^📅⏳🛫➕✅❌🔺⏫🔼🔽⏬#]*)/gu,
     );
     if (parts.length === 1) return children;
     return parts.map((part, i) => {
@@ -401,6 +450,10 @@ function renderWithTags(children: React.ReactNode): React.ReactNode {
       const dueMatch = part.match(/^📅\s*(\d{4}-\d{2}-\d{2})$/);
       if (dueMatch) {
         return <DueDatePill key={i} date={dueMatch[1]} />;
+      }
+      const markMatch = part.match(/^(⏳|🛫|➕|✅|❌|🔁)\uFE0F?\s*(.+?)\s*$/u);
+      if (markMatch) {
+        return <TaskMarkPill key={i} emoji={markMatch[1]} text={markMatch[2]} />;
       }
       // Check if part starts with whitespace + #tag (lookbehind matched \s)
       const wsMatch = part.match(/^(\s+)(#\p{L}[\p{L}\p{N}_/-]*)$/u);
@@ -425,7 +478,7 @@ function renderWithTags(children: React.ReactNode): React.ReactNode {
   return children;
 }
 
-export default function Preview({ content, notePath, darkMode = true, onOpenNote }: Props) {
+export default function Preview({ content, notePath, darkMode = true, onOpenNote, onContentChange, onMermaidToDrawing }: Props) {
   const noteDir = useMemo(() => {
     if (!notePath) return null;
     const lastSlash = Math.max(notePath.lastIndexOf("/"), notePath.lastIndexOf("\\"));
@@ -506,6 +559,37 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
 
   // Extract wiki targets from the (debounced) content and batch-resolve them
   // to absolute paths so the renderer can mark broken links and route clicks.
+  const isRoutine = useMemo(() => isRoutineNote(content), [content]);
+  const isMetrics = useMemo(() => isMetricsNote(content), [content]);
+
+  const commitContent = (next: string) => {
+    if (!onContentChange) return;
+    // Skip the debounce so the change shows immediately.
+    if (timerRef.current) clearTimeout(timerRef.current);
+    setDebouncedContent(fixImagePaths(next));
+    onContentChange(next);
+  };
+
+  const handleToggleTask = (lineIdx: number) => {
+    if (!onContentChange) return;
+    // Routines just flip the box; Finish session does the logging.
+    if (isRoutine) {
+      const next = toggleTaskLine(content, lineIdx);
+      if (next !== null) commitContent(next);
+      return;
+    }
+    const lines = content.split("\n");
+    if (!parseTaskLine(lines[lineIdx] ?? "")) return;
+    lines.splice(lineIdx, 1, ...toggleTaskDone(lines[lineIdx], todayIso()));
+    commitContent(lines.join("\n"));
+  };
+
+  const [taskEdit, setTaskEdit] = useState<{ line: number; task: Task } | null>(null);
+  const openTaskEdit = (lineIdx: number) => {
+    const task = parseTaskLine(content.split("\n")[lineIdx] ?? "");
+    if (task) setTaskEdit({ line: lineIdx, task });
+  };
+
   const wikiTargets = useMemo(() => extractWikiTargets(debouncedContent), [debouncedContent]);
   const [wikiResolved, setWikiResolved] = useState<Record<string, string | null>>({});
 
@@ -552,6 +636,10 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
 
   return (
     <div className="h-full overflow-auto p-5" onContextMenu={handleContextMenu}>
+      {isRoutine && (
+        <RoutineBar content={content} notePath={notePath} onContentChange={onContentChange} />
+      )}
+      {isMetrics && <MetricsBar content={content} onContentChange={onContentChange} />}
       <div ref={contentRef} className="markdown-body text-gray-800 dark:text-gray-200 max-w-none">
         <Markdown
           remarkPlugins={[remarkGfm, remarkWikiLinks]}
@@ -560,7 +648,13 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
               const cls = className || "";
               if (/language-mermaid/.test(cls)) {
                 const chart = String(children).replace(/\n$/, "");
-                return <MermaidBlock chart={chart} dark={darkMode} />;
+                return (
+                  <MermaidBlock
+                    chart={chart}
+                    dark={darkMode}
+                    onEditAsDrawing={onMermaidToDrawing ? () => onMermaidToDrawing(chart) : undefined}
+                  />
+                );
               }
               if (/language-lua-live/.test(cls)) {
                 const code = String(children).replace(/\n$/, "");
@@ -588,6 +682,23 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
               return <pre>{children}</pre>;
             },
             a: ({ href, children }) => {
+              if (href && href.startsWith("wikiembed:")) {
+                const target = href.slice(10);
+                const resolved = wikiResolved[target];
+                if (typeof resolved === "string" && isDrawingPath(resolved)) {
+                  return (
+                    <Suspense fallback={<span className="text-xs text-gray-400">Loading drawing…</span>}>
+                      <DrawingEmbed
+                        path={resolved}
+                        title={target}
+                        dark={darkMode}
+                        onOpen={onOpenNote ? () => onOpenNote(resolved) : undefined}
+                      />
+                    </Suspense>
+                  );
+                }
+                href = "wiki:" + target;
+              }
               if (href && href.startsWith("wiki:")) {
                 const target = href.slice(5);
                 const resolved = wikiResolved[target];
@@ -627,7 +738,19 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
               if (ytId) return <YouTubeEmbed id={ytId} />;
               return <p>{renderWithTags(children)}</p>;
             },
-            li: ({ node, children }) => {
+            input: ({ node: _node, type, checked, ...props }) => {
+              if (type !== "checkbox") return <input type={type} checked={checked} {...props} />;
+              return (
+                <input
+                  type="checkbox"
+                  checked={!!checked}
+                  disabled={!onContentChange}
+                  onChange={() => {}}
+                  className="task-checkbox"
+                />
+              );
+            },
+            li: ({ node, className, children }) => {
               // Tight list items get the link as a direct child; loose lists
               // wrap it in a paragraph. `soleYouTubeIdOf` handles both.
               const ytId = soleYouTubeIdOf(node);
@@ -635,6 +758,35 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
                 return (
                   <li style={{ listStyle: "none" }}>
                     <YouTubeEmbed id={ytId} />
+                  </li>
+                );
+              }
+              if (className?.includes("task-list-item")) {
+                const lineIdx = (node?.position?.start.line ?? 0) - 1;
+                return (
+                  <li
+                    className={className + " group relative"}
+                    onClick={(e) => {
+                      // Only the item's own checkbox; nested items handle theirs.
+                      if ((e.target as HTMLElement).classList.contains("task-checkbox")) {
+                        e.stopPropagation();
+                        handleToggleTask(lineIdx);
+                      }
+                    }}
+                  >
+                    {renderWithTags(children)}
+                    {onContentChange && !isRoutine && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openTaskEdit(lineIdx);
+                        }}
+                        className="task-edit-btn absolute right-0 top-0 px-1.5 text-xs rounded opacity-0 group-hover:opacity-100 text-gray-400 hover:text-accent hover:bg-gray-200 dark:hover:bg-gray-700 transition-opacity"
+                        title="Edit task"
+                      >
+                        ✎
+                      </button>
+                    )}
                   </li>
                 );
               }
@@ -665,6 +817,8 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
           {debouncedContent}
         </Markdown>
       </div>
+      {isRoutine && <RoutineHistory content={debouncedContent} dark={darkMode} />}
+      {isMetrics && <MetricsHistory content={debouncedContent} dark={darkMode} />}
       {notePath && backlinks.length > 0 && (
         <div className="mt-8 pt-4 border-t border-gray-300/40 dark:border-gray-700/40">
           <div className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
@@ -683,6 +837,17 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
             ))}
           </ul>
         </div>
+      )}
+      {taskEdit && (
+        <TaskDialog
+          initial={taskEdit.task}
+          isNew={false}
+          onApply={(task) => {
+            commitContent(applyTaskEdit(content, taskEdit.line, taskEdit.task, task, todayIso()));
+            setTaskEdit(null);
+          }}
+          onCancel={() => setTaskEdit(null)}
+        />
       )}
       {menu && (
         <ContextMenu

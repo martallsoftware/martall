@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useSettings, useTree, useNote, useNodeOps } from "./hooks/useTauri";
@@ -23,6 +23,11 @@ import QuickSwitcher from "./components/QuickSwitcher";
 import CalendarPanel from "./components/CalendarPanel";
 import TasksPanel from "./components/TasksPanel";
 import type { TreeNode } from "./types";
+import { drawingMeta, isDrawingPath, linkDrawingInNote, mermaidKey, mermaidToElements, sceneJson, withDrawingMeta } from "./utils/drawing";
+import CloseDrawingDialog, { type CloseDrawingChoice } from "./components/CloseDrawingDialog";
+
+// Excalidraw is large; load the drawing editor only when a drawing opens.
+const DrawingView = lazy(() => import("./components/DrawingView"));
 
 type ViewMode = "edit" | "preview" | "split" | "dashboard";
 
@@ -55,6 +60,48 @@ export default function App() {
   const { query, setQuery, results, searching, clearSearch, scope, setScope } = useSearch();
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  // Sidebar width: drag the handle on its right edge; double-click resets.
+  const SIDEBAR_DEFAULT = 240;
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    try {
+      const w = Number(localStorage.getItem("martall_sidebar_width"));
+      return w >= 180 && w <= 640 ? w : SIDEBAR_DEFAULT;
+    } catch {
+      return SIDEBAR_DEFAULT;
+    }
+  });
+  const [resizingSidebar, setResizingSidebar] = useState(false);
+  const saveSidebarWidth = (w: number) => {
+    try {
+      localStorage.setItem("martall_sidebar_width", String(w));
+    } catch {
+      /* ignore */
+    }
+  };
+  const startSidebarDrag = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarWidth;
+    let last = startW;
+    setResizingSidebar(true);
+    const onMove = (ev: MouseEvent) => {
+      last = Math.min(640, Math.max(180, startW + ev.clientX - startX));
+      setSidebarWidth(last);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      setResizingSidebar(false);
+      saveSidebarWidth(last);
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [sidebarWidth]);
   const [showSettings, setShowSettings] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showQuickSwitcher, setShowQuickSwitcher] = useState(false);
@@ -124,7 +171,8 @@ export default function App() {
   const [inputDialog, setInputDialog] = useState<{
     title: string;
     placeholder: string;
-    onConfirm: (val: string) => void;
+    withTemplates?: boolean;
+    onConfirm: (val: string, template?: string, answers?: Record<string, string>) => void;
   } | null>(null);
 
   // Refs for drag-drop handler to access latest state
@@ -179,7 +227,8 @@ export default function App() {
       }
 
       // Insert images into current note
-      if (imageFiles.length > 0 && noteRef.current) {
+      // (not into drawings: their content is scene JSON, not markdown)
+      if (imageFiles.length > 0 && noteRef.current && !isDrawingPath(noteRef.current.path)) {
         for (const filePath of imageFiles) {
           try {
             const relativePath = await invoke<string>("copy_image_to_assets", {
@@ -250,8 +299,23 @@ export default function App() {
     if (loaded) refreshTree();
   }, [loaded, settings.notes_directory, refreshTree]);
 
+  // Breadcrumb click → show that folder/note in the tree.
+  const [treeReveal, setTreeReveal] = useState<{ path: string; key: number } | null>(null);
+  const revealInTree = useCallback((path: string) => {
+    setActivePanel("notes");
+    setSidebarOpen(true);
+    setTreeReveal({ path, key: Date.now() });
+  }, []);
+
+  // Back navigation: paths of previously open notes, most recent last.
+  const [backStack, setBackStack] = useState<string[]>([]);
+
   const handleSelectNote = useCallback(
-    async (path: string) => {
+    async (path: string, opts?: { fromBack?: boolean }) => {
+      const current = noteRef.current?.path;
+      if (!opts?.fromBack && current && current !== path) {
+        setBackStack((s) => [...s.filter((p) => p !== current), current].slice(-50));
+      }
       await openNote(path);
       try {
         const fav = await invoke<boolean>("is_favorite", { path });
@@ -262,6 +326,46 @@ export default function App() {
     },
     [openNote],
   );
+
+  // Drawings made with "Edit as drawing": drawing path → the note + Mermaid code
+  // they came from, so closing can offer to put the drawing into the note.
+  const drawingOrigins = useRef(new Map<string, { notePath: string; code: string }>());
+  const [closeDrawingPrompt, setCloseDrawingPrompt] = useState<{
+    drawingPath: string;
+    notePath: string;
+    code: string;
+  } | null>(null);
+
+  /** Go back to the previous note; with no history, just close the current one. */
+  const goBack = useCallback(async (opts?: { skipPrompt?: boolean }) => {
+    const current = noteRef.current?.path;
+    const origin = current ? drawingOrigins.current.get(current) : undefined;
+    if (current && origin && !opts?.skipPrompt) {
+      setCloseDrawingPrompt({ drawingPath: current, ...origin });
+      return;
+    }
+    const prev = backStack[backStack.length - 1];
+    if (!prev) {
+      closeNote();
+      return;
+    }
+    setBackStack((s) => s.slice(0, -1));
+    await handleSelectNote(prev, { fromBack: true });
+  }, [backStack, handleSelectNote, closeNote]);
+
+  // Cmd/Ctrl+[ goes back (like a browser). Not in drawings: there Excalidraw
+  // uses it for "send backward"; use the Back / Close buttons instead.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (isDrawingPath(noteRef.current?.path)) return;
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === "[") {
+        e.preventDefault();
+        goBack();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [goBack]);
 
   const handleSelectSearchResult = useCallback(
     async (result: import("./types").SearchResult) => {
@@ -313,17 +417,113 @@ export default function App() {
   }, [handleSelectDay]);
 
   const handleCreateNote = useCallback(
-    async (parentDir: string, name: string) => {
-      const newPath = await createNote(parentDir, name);
+    async (parentDir: string, name: string, template?: string, answers?: Record<string, string>) => {
+      const newPath = await createNote(parentDir, name, template, answers);
       await openNote(newPath);
       refreshTags();
     },
     [createNote, openNote, refreshTags],
   );
 
+  /** Create `<name>.excalidraw` (adding " 2", " 3"… if taken) and open it. */
+  const handleCreateDrawing = useCallback(
+    async (parentDir: string, name: string, content = sceneJson()) => {
+      let path: string | null = null;
+      for (let i = 1; path === null; i++) {
+        const candidate = i === 1 ? name : `${name} ${i}`;
+        try {
+          path = await invoke<string>("create_drawing", { parentDir, name: candidate, content });
+        } catch (err) {
+          if (i > 50 || !String(err).includes("already exists")) throw err;
+        }
+      }
+      await refreshTree();
+      await handleSelectNote(path);
+      return path;
+    },
+    [refreshTree, handleSelectNote],
+  );
+
+  const treeRef = useRef(tree);
+  treeRef.current = tree;
+
+  /**
+   * "Edit as drawing" on a mermaid block: reopen the drawing made earlier from
+   * the same Mermaid code (same folder), or create one next to the note.
+   */
+  const handleMermaidToDrawing = useCallback(
+    async (code: string) => {
+      const current = noteRef.current;
+      if (!current) return;
+      const dir = current.path.replace(/[/\\][^/\\]*$/, "");
+      const title = current.path.split(/[/\\]/).pop()!.replace(/\.md$/i, "");
+      const key = mermaidKey(code);
+
+      const siblings = (function find(nodes: TreeNode[]): TreeNode[] | null {
+        if (dir === settingsRef.current.notes_directory.replace(/[/\\]+$/, "")) return nodes;
+        for (const n of nodes) {
+          if (!n.is_folder) continue;
+          if (n.path === dir) return n.children;
+          const r = find(n.children);
+          if (r) return r;
+        }
+        return null;
+      })(treeRef.current) ?? [];
+      for (const n of siblings) {
+        if (n.is_folder || !isDrawingPath(n.path)) continue;
+        try {
+          const { content } = await invoke<{ content: string }>("read_note", { path: n.path });
+          if (drawingMeta(content).mermaid === key) {
+            drawingOrigins.current.set(n.path, { notePath: current.path, code });
+            await handleSelectNote(n.path);
+            return;
+          }
+        } catch {
+          /* unreadable file: skip */
+        }
+      }
+
+      const { elements, files } = await mermaidToElements(code);
+      const content = withDrawingMeta(
+        JSON.stringify({ ...JSON.parse(sceneJson(elements)), files }),
+        { mermaid: key },
+      );
+      const drawingPath = await handleCreateDrawing(dir, `${title} diagram`, content);
+      drawingOrigins.current.set(drawingPath, { notePath: current.path, code });
+    },
+    [handleCreateDrawing, handleSelectNote],
+  );
+
+  /** Answer to the "Update note?" prompt shown when closing such a drawing. */
+  const finishCloseDrawing = useCallback(
+    async (choice: CloseDrawingChoice) => {
+      const prompt = closeDrawingPrompt;
+      setCloseDrawingPrompt(null);
+      if (!prompt) return;
+      drawingOrigins.current.delete(prompt.drawingPath);
+      if (choice !== "close") {
+        try {
+          const name = prompt.drawingPath.split(/[/\\]/).pop()!.replace(/\.excalidraw$/i, "");
+          const { content } = await invoke<{ content: string }>("read_note", { path: prompt.notePath });
+          const updated = linkDrawingInNote(content, prompt.code, name, choice);
+          // If the Mermaid block was edited meanwhile, add the drawing at the end instead.
+          const next = updated ?? `${content.replace(/\s*$/, "")}\n\n![[${name}]]\n`;
+          await invoke("save_note", { path: prompt.notePath, content: next });
+        } catch (err) {
+          console.error("Failed to update note with drawing:", err);
+        }
+      }
+      // Return to the note (it is normally the top of the back stack).
+      setBackStack((s) => (s[s.length - 1] === prompt.notePath ? s.slice(0, -1) : s));
+      await handleSelectNote(prompt.notePath, { fromBack: true });
+    },
+    [closeDrawingPrompt, handleSelectNote],
+  );
+
   const handleRename = useCallback(
     async (oldPath: string, newName: string) => {
       const newPath = await renameNode(oldPath, newName);
+      setBackStack((s) => s.map((p) => (p === oldPath ? newPath : p)));
       if (note && note.path === oldPath) {
         await openNote(newPath);
       }
@@ -335,6 +535,7 @@ export default function App() {
   const handleDelete = useCallback(
     async (path: string) => {
       await deleteNode(path);
+      setBackStack((s) => s.filter((p) => p !== path && !p.startsWith(path + "/")));
       refreshTags();
       if (note && note.path === path) {
         closeNote();
@@ -452,9 +653,10 @@ ${previewEl.innerHTML}
     setInputDialog({
       title: "New Note",
       placeholder: "Note name",
-      onConfirm: async (name) => {
+      withTemplates: true,
+      onConfirm: async (name, template, answers) => {
         setInputDialog(null);
-        await handleCreateNote(currentFolder, name);
+        await handleCreateNote(currentFolder, name, template, answers);
       },
     });
   }, [currentFolder, handleCreateNote]);
@@ -486,10 +688,25 @@ ${previewEl.innerHTML}
 
       {/* Sidebar Panel */}
       <aside
-        className={`flex flex-col border-r border-gray-200 dark:border-gray-700/50 bg-white dark:bg-[#1e1e2e] transition-all duration-200 ${
-          sidebarOpen ? "w-60" : "w-0 overflow-hidden"
-        }`}
+        className={`relative flex-shrink-0 flex flex-col border-r border-gray-200 dark:border-gray-700/50 bg-white dark:bg-[#1e1e2e] ${
+          resizingSidebar ? "" : "transition-all duration-200"
+        } ${sidebarOpen ? "" : "overflow-hidden"}`}
+        style={{ width: sidebarOpen ? sidebarWidth : 0 }}
       >
+        {/* Resize handle */}
+        {sidebarOpen && (
+          <div
+            onMouseDown={startSidebarDrag}
+            onDoubleClick={() => {
+              setSidebarWidth(SIDEBAR_DEFAULT);
+              saveSidebarWidth(SIDEBAR_DEFAULT);
+            }}
+            title="Drag to resize — double-click to reset"
+            className={`absolute top-0 -right-1 z-20 h-full w-2 cursor-col-resize transition-colors hover:bg-accent/50 ${
+              resizingSidebar ? "bg-accent/60" : ""
+            }`}
+          />
+        )}
         {/* Panel: Home */}
         {activePanel === "home" && (
           <HomePanel
@@ -527,6 +744,8 @@ ${previewEl.innerHTML}
               selectedPath={note?.path ?? null}
               onSelectNote={handleSelectNote}
               onCreateNote={handleCreateNote}
+              reveal={treeReveal}
+              onCreateDrawing={async (dir, name) => { await handleCreateDrawing(dir, name); }}
               onCreateFolder={createFolder}
               onRename={handleRename}
               onDelete={handleDelete}
@@ -653,6 +872,20 @@ ${previewEl.innerHTML}
             </svg>
           </button>
 
+          {/* Back to the previous note */}
+          {note && backStack.length > 0 && activePanel !== "graph" && (
+            <button
+              onClick={() => goBack()}
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 hover:text-accent transition-colors flex-shrink-0"
+              title={`Back to ${backStack[backStack.length - 1].split(/[\\/]/).pop()?.replace(/\.(md|excalidraw)$/, "")} (⌘[)`}
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M10 3L5 8l5 5" />
+              </svg>
+              Back
+            </button>
+          )}
+
           {/* Note title / breadcrumb */}
           {activePanel === "graph" && !note ? (
             <span className="text-sm font-medium truncate">Tag Graph</span>
@@ -664,16 +897,28 @@ ${previewEl.innerHTML}
                 rel = rel.slice(root.length).replace(/^[\\/]+/, "");
               }
               const parts = rel.split(/[\\/]/);
-              const filename = (parts.pop() || "").replace(/\.md$/, "");
+              const filename = (parts.pop() || "").replace(/\.(md|excalidraw)$/, "");
               return (
                 <div className="flex items-center gap-1 min-w-0 text-sm truncate">
                   {parts.map((folder, i) => (
                     <span key={i} className="flex items-center gap-1 text-gray-400 dark:text-gray-500 truncate">
-                      <span className="truncate">{folder}</span>
+                      <button
+                        onClick={() => revealInTree(`${root.replace(/[\\/]+$/, "")}/${parts.slice(0, i + 1).join("/")}`)}
+                        className="truncate hover:text-accent hover:underline transition-colors"
+                        title={`Show “${folder}” in the tree`}
+                      >
+                        {folder}
+                      </button>
                       <span className="text-gray-300 dark:text-gray-600">›</span>
                     </span>
                   ))}
-                  <span className="font-medium truncate">{filename}</span>
+                  <button
+                    onClick={() => revealInTree(note.path)}
+                    className="font-medium truncate hover:text-accent transition-colors"
+                    title="Show in the tree"
+                  >
+                    {filename}
+                  </button>
                 </div>
               );
             })()
@@ -760,7 +1005,7 @@ ${previewEl.innerHTML}
           )}
 
           {/* View mode toggle */}
-          {note && activePanel !== "graph" && (
+          {note && activePanel !== "graph" && !isDrawingPath(note.path) && (
             <div className="flex rounded-lg border border-gray-300 dark:border-gray-600 overflow-hidden">
               {((isDashboard
                 ? (["edit", "split", "preview", "dashboard"] as ViewMode[])
@@ -788,13 +1033,27 @@ ${previewEl.innerHTML}
           )}
 
           {/* Share menu */}
-          {note && activePanel !== "graph" && (
+          {note && activePanel !== "graph" && !isDrawingPath(note.path) && (
             <ShareMenu
               onPrint={handlePrint}
               onEmail={handleEmail}
               onExportHtml={handleExportHtml}
               onExportPdf={handleExportPdf}
             />
+          )}
+
+          {/* Close a drawing: back to the note it was opened from */}
+          {note && activePanel !== "graph" && isDrawingPath(note.path) && (
+            <button
+              onClick={() => goBack()}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-gray-300 dark:border-gray-600 text-xs text-gray-600 dark:text-gray-300 hover:border-accent hover:text-accent transition-colors"
+              title={backStack.length ? "Close and go back to the previous note" : "Close drawing"}
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                <path d="M4 4l8 8M12 4l-8 8" />
+              </svg>
+              Close
+            </button>
           )}
         </header>
 
@@ -805,6 +1064,19 @@ ${previewEl.innerHTML}
               handleSelectNote(path);
               setActivePanel("notes");
             }} darkMode={settings.dark_theme} />
+          ) : note && isDrawingPath(note.path) ? (
+            <Suspense
+              fallback={
+                <div className="flex items-center justify-center h-full text-gray-400 text-sm">Loading drawing…</div>
+              }
+            >
+              <DrawingView
+                key={note.path}
+                content={note.content}
+                darkMode={settings.dark_theme}
+                onChange={updateContent}
+              />
+            </Suspense>
           ) : note && viewMode === "dashboard" ? (
             <DashboardView
               content={note.content}
@@ -844,7 +1116,7 @@ ${previewEl.innerHTML}
                   className="h-full overflow-auto"
                   style={{ width: viewMode === "split" ? `${(1 - splitRatio) * 100}%` : "100%" }}
                 >
-                  <Preview content={note.content} notePath={note.path} darkMode={settings.dark_theme} onOpenNote={handleSelectNote} />
+                  <Preview content={note.content} notePath={note.path} darkMode={settings.dark_theme} onOpenNote={handleSelectNote} onContentChange={updateContent} onMermaidToDrawing={handleMermaidToDrawing} />
                 </div>
               )}
             </div>
@@ -882,11 +1154,22 @@ ${previewEl.innerHTML}
         />
       )}
 
+      {/* "Update note?" when closing a drawing made from a Mermaid block */}
+      {closeDrawingPrompt && (
+        <CloseDrawingDialog
+          drawingName={closeDrawingPrompt.drawingPath.split(/[/\\]/).pop()!.replace(/\.excalidraw$/i, "")}
+          noteName={closeDrawingPrompt.notePath.split(/[/\\]/).pop()!.replace(/\.md$/i, "")}
+          onChoose={finishCloseDrawing}
+          onCancel={() => setCloseDrawingPrompt(null)}
+        />
+      )}
+
       {/* Input dialog */}
       {inputDialog && (
         <InputDialog
           title={inputDialog.title}
           placeholder={inputDialog.placeholder}
+          withTemplates={inputDialog.withTemplates}
           onConfirm={inputDialog.onConfirm}
           onCancel={() => setInputDialog(null)}
         />

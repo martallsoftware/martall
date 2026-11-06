@@ -104,8 +104,8 @@ fn build_tree(dir: &Path) -> Vec<TreeNode> {
                 is_folder: true,
                 children,
             });
-        } else if path.extension().is_some_and(|e| e == "md") {
-            let display_name = name.strip_suffix(".md").unwrap_or(&name).to_string();
+        } else if database::is_indexable(&path) {
+            let display_name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
             files.push(TreeNode {
                 name: display_name,
                 path: path.to_string_lossy().to_string(),
@@ -287,9 +287,37 @@ fn save_note(state: State<'_, AppState>, path: String, content: String) -> Resul
             .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
             .unwrap_or(0);
         let db = state.db.lock().unwrap();
-        database::upsert_note(&db, &rp_str, &title, &content, mtime);
+        database::upsert_note(&db, &rp_str, &title, &database::index_text(Path::new(&path), &content), mtime);
     }
     Ok(())
+}
+
+/// Create `<name>.excalidraw` in `parent_dir` with the given scene JSON.
+#[tauri::command]
+fn create_drawing(
+    state: State<'_, AppState>,
+    parent_dir: String,
+    name: String,
+    content: String,
+) -> Result<String, String> {
+    let ext = format!(".{}", database::DRAWING_EXT);
+    let stem = name.trim().trim_end_matches(ext.as_str());
+    if stem.is_empty() || stem.contains('/') || stem.contains('\\') {
+        return Err("Invalid drawing name".to_string());
+    }
+    let full_path = Path::new(&parent_dir).join(format!("{}{}", stem, ext));
+    if full_path.exists() {
+        return Err(format!("A drawing named '{}' already exists", stem));
+    }
+    fs::write(&full_path, &content).map_err(|e| e.to_string())?;
+
+    let settings = state.settings.lock().unwrap();
+    let root = Path::new(&settings.notes_directory);
+    if let Ok(rp) = full_path.strip_prefix(root) {
+        let db = state.db.lock().unwrap();
+        database::upsert_note(&db, &rp.to_string_lossy(), stem, &database::index_text(&full_path, &content), 0);
+    }
+    Ok(full_path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -297,24 +325,322 @@ fn create_folder(path: String) -> Result<(), String> {
     fs::create_dir_all(&path).map_err(|e| e.to_string())
 }
 
+/// Vault folder whose `.md` files are offered as templates for new notes.
+const TEMPLATES_FOLDER: &str = "Templates";
+/// Lists default templates already written once, so deleted ones stay deleted.
+const TEMPLATES_SEEDED_FILE: &str = ".seeded";
+/// Used for new daily notes when present in the templates folder.
+const DAILY_TEMPLATE: &str = "Daily";
+
+const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
+    ("Todo", "# {{title}}\n\n\
+Created {{date}}\n\n\
+## Todo\n\
+- [ ] \n\n\
+## Done\n"),
+    ("Routine", "# {{title}}\n\n\
+#routine\n\n\
+- [ ] First item\n\
+- [ ] Second item\n\n\
+## Log\n"),
+    ("Daily", "# {{date}} · {{weekday}}\n\n\
+## Top 3 today\n\
+- [ ] \n\
+- [ ] \n\
+- [ ] \n\n\
+## Notes\n\n\n\
+## Log\n"),
+    ("Meeting", "# {{title}}\n\n\
+#meeting · {{date}} {{time}}\n\n\
+**Attendees:** {{ask:Attendees}}\n\n\
+## Agenda\n\
+1. \n\n\
+## Notes\n\n\n\
+## Decisions\n\
+- \n\n\
+## Action items\n\
+- [ ] Who: what 📅 {{date}}\n"),
+    ("Gym – Push", "# {{title}}\n\n\
+#routine #gym\n\n\
+- [ ] Bench press 4×8 @ 60kg\n\
+- [ ] Overhead press 3×8 @ 35kg\n\
+- [ ] Incline dumbbell press 3×10 @ 20kg\n\
+- [ ] Lateral raises 3×15 @ 8kg\n\
+- [ ] Triceps pushdown 3×12 @ 25kg\n\n\
+## Log\n"),
+    ("Gym – Pull", "# {{title}}\n\n\
+#routine #gym\n\n\
+- [ ] Deadlift 3×5 @ 100kg\n\
+- [ ] Pull-ups 3×8\n\
+- [ ] Barbell row 4×8 @ 60kg\n\
+- [ ] Face pulls 3×15 @ 15kg\n\
+- [ ] Biceps curls 3×12 @ 12kg\n\n\
+## Log\n"),
+    ("Gym – Legs", "# {{title}}\n\n\
+#routine #gym\n\n\
+- [ ] Squats 4×8 @ 80kg\n\
+- [ ] Romanian deadlift 3×10 @ 60kg\n\
+- [ ] Leg press 3×10 @ 120kg\n\
+- [ ] Lunges 3×12 @ 16kg\n\
+- [ ] Calf raises 4×15 @ 40kg\n\n\
+## Log\n"),
+    ("Body metrics", "# {{title}}\n\n\
+#metrics\n\n\
+Track: weight (kg) · waist (cm) · sleep (h) · steps\n\n\
+## Log\n"),
+    ("Weekly review", "# {{title}}\n\n\
+#review · Week {{week}}\n\n\
+Days: {{week_days}}\n\n\
+## Wins\n\
+- \n\n\
+## What didn't go well\n\
+- \n\n\
+## Lessons\n\
+- \n\n\
+## Next week's top 3\n\
+- [ ] \n\
+- [ ] \n\
+- [ ] \n"),
+    ("Project", "# {{title}}\n\n\
+#project · started {{date}}\n\n\
+**Goal:** {{ask:Goal}}  \n\
+**Status:** 🟡 Planning\n\n\
+## Milestones\n\
+- [ ] Plan 📅 {{date}}\n\
+- [ ] First version\n\
+- [ ] Done\n\n\
+## Timeline\n\
+```mermaid\n\
+gantt\n\
+  dateFormat YYYY-MM-DD\n\
+  section Work\n\
+  Plan :a1, {{date}}, 7d\n\
+  Build :a2, after a1, 14d\n\
+  Polish :after a2, 7d\n\
+```\n\n\
+## Notes\n\n\n\
+## Links\n\
+- \n"),
+    ("Bug report", "# {{title}}\n\n\
+#bug · {{date}} · Project: {{ask:Project}}\n\n\
+**Status:** 🔴 Open  \n\
+**Version:** \n\n\
+## Steps to reproduce\n\
+1. \n\n\
+## Expected\n\n\n\
+## Actual\n\n\n\
+## Logs\n\
+```text\n\
+\n\
+```\n\n\
+## Fix\n\
+- [ ] Find cause\n\
+- [ ] Fix\n\
+- [ ] Test\n"),
+    ("Book", "# {{title}}\n\n\
+#book · {{ask:Author}} · started {{date}}\n\n\
+**Rating:** ☆☆☆☆☆  \n\
+**Finished:** \n\n\
+## Summary\n\n\n\
+## Quotes\n\
+> \n\n\
+## Takeaways\n\
+- \n"),
+    ("Film", "# {{title}}\n\n\
+#film · watched {{date}}\n\n\
+**Director:** {{ask:Director}}  \n\
+**Rating:** ☆☆☆☆☆\n\n\
+## Thoughts\n\n\n\
+## Favourite scenes\n\
+- \n"),
+    ("Recipe", "# {{title}}\n\n\
+#recipe · serves {{ask:Servings}}\n\n\
+**Time:** \n\n\
+## Ingredients\n\
+- [ ] \n\n\
+## Steps\n\
+1. \n\n\
+## Notes\n"),
+    ("Packing list", "# {{title}}\n\n\
+#routine #travel\n\n\
+- [ ] Passport / ID\n\
+- [ ] Wallet & cards\n\
+- [ ] Keys\n\
+- [ ] Phone + charger\n\
+- [ ] Headphones\n\
+- [ ] Laptop + charger\n\
+- [ ] Toiletries\n\
+- [ ] Medicine\n\
+- [ ] Clothes\n\n\
+## Log\n"),
+    ("Morning routine", "# {{title}}\n\n\
+#routine #habit\n\n\
+- [ ] Glass of water\n\
+- [ ] Stretch 10 min\n\
+- [ ] No phone first 30 min\n\
+- [ ] Plan the day\n\n\
+## Log\n"),
+    ("Weekly cleaning", "# {{title}}\n\n\
+#routine #home\n\n\
+- [ ] Vacuum\n\
+- [ ] Mop floors\n\
+- [ ] Bathroom\n\
+- [ ] Kitchen surfaces\n\
+- [ ] Change bed sheets\n\
+- [ ] Take out recycling\n\n\
+## Log\n"),
+    ("Home & car maintenance", "# {{title}}\n\n\
+#routine #home\n\n\
+- [ ] Test smoke alarms\n\
+- [ ] Clean dishwasher filter\n\
+- [ ] Clean fridge\n\
+- [ ] Car tyre pressure\n\
+- [ ] Car oil & washer fluid\n\n\
+## Log\n"),
+];
+
+/// Write any default template that hasn't been written before.
+fn seed_templates(root: &Path) -> Result<(), String> {
+    let dir = root.join(TEMPLATES_FOLDER);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let marker = dir.join(TEMPLATES_SEEDED_FILE);
+    let mut seeded: Vec<String> = fs::read_to_string(&marker)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let mut changed = false;
+    for (name, body) in DEFAULT_TEMPLATES {
+        if seeded.iter().any(|s| s == name) {
+            continue;
+        }
+        let path = dir.join(format!("{}.md", name));
+        if !path.exists() {
+            fs::write(&path, body).map_err(|e| e.to_string())?;
+        }
+        seeded.push(name.to_string());
+        changed = true;
+    }
+    if changed {
+        fs::write(&marker, seeded.join("\n") + "\n").map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// List template names (file stems) in the vault's `Templates/` folder,
+/// adding any new default templates first.
 #[tauri::command]
-fn create_note(state: State<'_, AppState>, parent_dir: String, name: String) -> Result<String, String> {
+fn list_templates(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let settings = state.settings.lock().unwrap();
+    let root = Path::new(&settings.notes_directory);
+    seed_templates(root)?;
+    let mut names: Vec<String> = fs::read_dir(root.join(TEMPLATES_FOLDER))
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().map_or(false, |x| x == "md"))
+        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+        .filter(|n| n != DAILY_TEMPLATE)
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    Ok(names)
+}
+
+fn ask_regex() -> regex_lite::Regex {
+    regex_lite::Regex::new(r"\{\{ask:([^}]+)\}\}").unwrap()
+}
+
+fn read_template(root: &Path, name: &str) -> Result<String, String> {
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err("Invalid template name".into());
+    }
+    let path = root.join(TEMPLATES_FOLDER).join(format!("{}.md", name));
+    fs::read_to_string(&path).map_err(|e| format!("Template '{}': {}", name, e))
+}
+
+/// The `{{ask:Label}}` labels in a template, in order, without duplicates.
+#[tauri::command]
+fn template_questions(state: State<'_, AppState>, name: String) -> Result<Vec<String>, String> {
+    let settings = state.settings.lock().unwrap();
+    let raw = read_template(Path::new(&settings.notes_directory), &name)?;
+    let mut out: Vec<String> = Vec::new();
+    for c in ask_regex().captures_iter(&raw) {
+        let label = c[1].trim().to_string();
+        if !out.contains(&label) {
+            out.push(label);
+        }
+    }
+    Ok(out)
+}
+
+/// Read `Templates/<name>.md` and fill in its placeholders:
+/// `{{title}}`, `{{date}}`, `{{weekday}}`, `{{week}}` (2026-W42) and
+/// `{{week_days}}` (links to that week's daily notes) from `date`,
+/// `{{time}}` (now), and `{{ask:Label}}` from `answers` (empty if missing).
+fn render_template(
+    root: &Path,
+    name: &str,
+    title: &str,
+    date: chrono::NaiveDate,
+    answers: &std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    use chrono::Datelike;
+    let raw = read_template(root, name)?;
+    let monday = date - chrono::Duration::days(date.weekday().num_days_from_monday() as i64);
+    let week_days = (0..7)
+        .map(|i| format!("[[{}]]", (monday + chrono::Duration::days(i)).format("%Y-%m-%d")))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let filled = raw
+        .replace("{{title}}", title)
+        .replace("{{date}}", &date.format("%Y-%m-%d").to_string())
+        .replace("{{weekday}}", &date.format("%A").to_string())
+        .replace("{{week}}", &date.format("%G-W%V").to_string())
+        .replace("{{week_days}}", &week_days)
+        .replace("{{time}}", &chrono::Local::now().format("%H:%M").to_string());
+    Ok(ask_regex()
+        .replace_all(&filled, |c: &regex_lite::Captures| {
+            answers.get(c[1].trim()).cloned().unwrap_or_default()
+        })
+        .into_owned())
+}
+
+#[tauri::command]
+fn create_note(
+    state: State<'_, AppState>,
+    parent_dir: String,
+    name: String,
+    template: Option<String>,
+    answers: Option<std::collections::HashMap<String, String>>,
+) -> Result<String, String> {
     let file_name = if name.ends_with(".md") {
         name.clone()
     } else {
         format!("{}.md", name)
     };
     let full_path = Path::new(&parent_dir).join(&file_name);
-    fs::write(&full_path, "").map_err(|e| e.to_string())?;
+    if full_path.exists() {
+        return Err(format!("A note named '{}' already exists", file_name));
+    }
+    let title = full_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
 
-    // Index the new note
     let settings = state.settings.lock().unwrap();
     let root = Path::new(&settings.notes_directory);
+    let content = match template.as_deref() {
+        Some(t) if !t.is_empty() => {
+            let answers = answers.unwrap_or_default();
+            render_template(root, t, &title, chrono::Local::now().date_naive(), &answers)?
+        }
+        _ => String::new(),
+    };
+    fs::write(&full_path, &content).map_err(|e| e.to_string())?;
+
+    // Index the new note
     if let Ok(rp) = full_path.strip_prefix(root) {
         let rp_str = rp.to_string_lossy().to_string();
-        let title = full_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
         let db = state.db.lock().unwrap();
-        database::upsert_note(&db, &rp_str, &title, "", 0);
+        database::upsert_note(&db, &rp_str, &title, &content, 0);
     }
 
     Ok(full_path.to_string_lossy().to_string())
@@ -328,10 +654,13 @@ fn rename_node(state: State<'_, AppState>, old_path: String, new_name: String) -
     let new_path = if old.is_dir() {
         parent.join(&new_name)
     } else {
-        let file_name = if new_name.ends_with(".md") {
+        // Keep the file's own extension (.md or .excalidraw).
+        let ext = old.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_else(|| "md".into());
+        let suffix = format!(".{}", ext);
+        let file_name = if new_name.ends_with(&suffix) {
             new_name.clone()
         } else {
-            format!("{}.md", new_name)
+            format!("{}{}", new_name, suffix)
         };
         parent.join(file_name)
     };
@@ -954,6 +1283,13 @@ fn get_due_tasks(
     ))
 }
 
+#[tauri::command]
+fn get_all_tasks(state: State<'_, AppState>) -> Result<Vec<database::TaskItem>, String> {
+    let settings = state.settings.lock().unwrap();
+    let db = state.db.lock().unwrap();
+    Ok(database::get_all_tasks(&db, &settings.notes_directory, TEMPLATES_FOLDER))
+}
+
 // ---------------------------------------------------------------------------
 // Daily notes
 // ---------------------------------------------------------------------------
@@ -988,7 +1324,13 @@ fn open_or_create_daily_note(
     fs::create_dir_all(&daily_dir).map_err(|e| e.to_string())?;
     let note_path = daily_dir.join(format!("{}.md", date));
     if !note_path.exists() {
-        let template = format!("# {}\n\n", date);
+        // Daily notes use Templates/Daily.md when it exists.
+        let _ = seed_templates(root);
+        let template = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+            .ok()
+            .filter(|_| root.join(TEMPLATES_FOLDER).join(format!("{}.md", DAILY_TEMPLATE)).exists())
+            .and_then(|d| render_template(root, DAILY_TEMPLATE, &date, d, &Default::default()).ok())
+            .unwrap_or_else(|| format!("# {}\n\n", date));
         fs::write(&note_path, &template).map_err(|e| e.to_string())?;
         let db = state.db.lock().unwrap();
         let mtime = fs::metadata(&note_path)
@@ -1227,6 +1569,9 @@ pub fn run() {
             save_note,
             create_folder,
             create_note,
+            create_drawing,
+            list_templates,
+            template_questions,
             rename_node,
             delete_node,
             move_node,
@@ -1251,6 +1596,7 @@ pub fn run() {
             list_daily_notes,
             open_or_create_daily_note,
             get_due_tasks,
+            get_all_tasks,
             is_favorite,
             toggle_favorite,
             get_favorite_notes,
@@ -1265,4 +1611,59 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+
+    fn temp_vault(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("martall-test-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn seeding_adds_new_defaults_but_not_deleted_ones() {
+        let root = temp_vault("seed");
+        let dir = root.join(TEMPLATES_FOLDER);
+        seed_templates(&root).unwrap();
+        for (name, _) in DEFAULT_TEMPLATES {
+            assert!(dir.join(format!("{}.md", name)).exists(), "{} missing", name);
+        }
+        fs::remove_file(dir.join("Meeting.md")).unwrap();
+        fs::write(dir.join("Todo.md"), "my own todo").unwrap();
+        seed_templates(&root).unwrap();
+        assert!(!dir.join("Meeting.md").exists());
+        assert_eq!(fs::read_to_string(dir.join("Todo.md")).unwrap(), "my own todo");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn render_fills_placeholders_and_rejects_paths() {
+        let root = temp_vault("render");
+        seed_templates(&root).unwrap();
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 15).unwrap();
+        let none = std::collections::HashMap::new();
+        let daily = render_template(&root, DAILY_TEMPLATE, "2026-10-15", date, &none).unwrap();
+        assert!(daily.starts_with("# 2026-10-15 · Thursday\n"));
+        let gym = render_template(&root, "Gym – Legs", "Leg day", date, &none).unwrap();
+        assert!(gym.starts_with("# Leg day\n\n#routine"));
+        assert!(render_template(&root, "../secret", "x", date, &none).is_err());
+
+        let review = render_template(&root, "Weekly review", "W42", date, &none).unwrap();
+        assert!(review.contains("Week 2026-W42"));
+        assert!(review.contains("Days: [[2026-10-12]] · [[2026-10-13]]"));
+        assert!(review.contains("[[2026-10-18]]\n"));
+
+        let mut answers = std::collections::HashMap::new();
+        answers.insert("Goal".to_string(), "Ship v1".to_string());
+        let project = render_template(&root, "Project", "Martall", date, &answers).unwrap();
+        assert!(project.contains("**Goal:** Ship v1"));
+        assert!(!project.contains("{{"));
+        let meeting = render_template(&root, "Meeting", "Sync", date, &none).unwrap();
+        assert!(meeting.contains("**Attendees:** \n"));
+        fs::remove_dir_all(&root).unwrap();
+    }
 }

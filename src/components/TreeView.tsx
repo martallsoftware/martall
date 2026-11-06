@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { TreeNode } from "../types";
 import type { MenuItem } from "./ContextMenu";
@@ -40,19 +40,31 @@ interface Props {
   nodes: TreeNode[];
   selectedPath: string | null;
   onSelectNote: (path: string) => void;
-  onCreateNote: (parentDir: string, name: string) => Promise<void>;
+  onCreateNote: (
+    parentDir: string,
+    name: string,
+    template?: string,
+    answers?: Record<string, string>,
+  ) => Promise<void>;
   onCreateFolder: (path: string) => Promise<void>;
+  onCreateDrawing: (parentDir: string, name: string) => Promise<void>;
   onRename: (path: string, newName: string) => Promise<void>;
   onDelete: (path: string) => Promise<void>;
   onMove: (source: string, destDir: string) => Promise<void>;
   rootDir: string;
+  /** Expand the folders down to `path`, scroll to it and flash it (e.g. from the breadcrumb). */
+  reveal?: { path: string; key: number } | null;
 }
+
+// Last reveal handled, so a remount (switching sidebar panels) doesn't replay it.
+let lastRevealKey = 0;
 
 interface NodeProps {
   node: TreeNode;
   depth: number;
   selectedPath: string | null;
   expandedPaths: Set<string>;
+  highlightPath: string | null;
   toggleExpand: (path: string) => void;
   onSelectNote: (path: string) => void;
   onContextMenu: (e: React.MouseEvent, node: TreeNode) => void;
@@ -68,6 +80,7 @@ function TreeNodeItem({
   depth,
   selectedPath,
   expandedPaths,
+  highlightPath,
   toggleExpand,
   onSelectNote,
   onContextMenu,
@@ -77,6 +90,7 @@ function TreeNodeItem({
   onRenameSubmit,
   onRenameCancel,
 }: NodeProps) {
+  const isHighlighted = node.path === highlightPath;
   const isExpanded = expandedPaths.has(node.path);
   const isSelected = node.path === selectedPath;
   const isRenaming = node.path === renamingPath;
@@ -88,7 +102,8 @@ function TreeNodeItem({
           isSelected
             ? "bg-accent/15 text-accent"
             : "hover:bg-gray-200/60 dark:hover:bg-gray-700/40"
-        }`}
+        }${isHighlighted ? " ring-2 ring-accent/70 bg-accent/10" : ""}`}
+        data-tree-path={node.path}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
         onClick={() => {
           if (node.is_folder) {
@@ -121,6 +136,13 @@ function TreeNodeItem({
               ) : (
                 <path d="M2 4h5l1.5 2H14v7H2V4z" />
               )}
+            </svg>
+          ) : node.path.toLowerCase().endsWith(".excalidraw") ? (
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" className="text-accent">
+              <rect x="1.5" y="2.5" width="5" height="4" rx="0.5" />
+              <circle cx="11.5" cy="11.5" r="2.5" />
+              <path d="M6.5 4.5h3a2 2 0 0 1 2 2V9" />
+              <path d="M2 14l3-3" />
             </svg>
           ) : (
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
@@ -164,6 +186,7 @@ function TreeNodeItem({
               depth={depth + 1}
               selectedPath={selectedPath}
               expandedPaths={expandedPaths}
+              highlightPath={highlightPath}
               toggleExpand={toggleExpand}
               onSelectNote={onSelectNote}
               onContextMenu={onContextMenu}
@@ -186,7 +209,8 @@ type DialogState =
       type: "input";
       title: string;
       placeholder: string;
-      onConfirm: (val: string) => void;
+      withTemplates?: boolean;
+      onConfirm: (val: string, template?: string, answers?: Record<string, string>) => void;
     }
   | { type: "confirm"; title: string; message: string; onConfirm: () => void }
   | { type: "move"; sourcePath: string; sourceName: string };
@@ -197,12 +221,45 @@ export default function TreeView({
   onSelectNote,
   onCreateNote,
   onCreateFolder,
+  onCreateDrawing,
   onRename,
   onDelete,
   onMove,
   rootDir,
+  reveal,
 }: Props) {
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
+  const [highlightPath, setHighlightPath] = useState<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Reveal: open every folder from the vault root down to the target.
+  useEffect(() => {
+    if (!reveal || reveal.key === lastRevealKey) return;
+    lastRevealKey = reveal.key;
+    const { path } = reveal;
+    const rel = path.startsWith(rootDir) ? path.slice(rootDir.length).replace(/^[\\/]+/, "") : "";
+    const parts = rel.split(/[\\/]/).filter(Boolean);
+    const isFolder = !/\.(md|excalidraw)$/i.test(path);
+    const folders: string[] = [];
+    let acc = rootDir.replace(/[\\/]+$/, "");
+    (isFolder ? parts : parts.slice(0, -1)).forEach((p) => {
+      acc = `${acc}/${p}`;
+      folders.push(acc);
+    });
+    setExpandedPaths((prev) => new Set([...prev, ...folders]));
+    setHighlightPath(path);
+    // Scroll once the expanded folders have rendered.
+    const scroll = setTimeout(() => {
+      const el = containerRef.current?.querySelector(`[data-tree-path="${CSS.escape(path)}"]`);
+      el?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 60);
+    const t = setTimeout(() => setHighlightPath(null), 2000);
+    return () => {
+      clearTimeout(scroll);
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reveal?.key]);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -269,9 +326,24 @@ export default function TreeView({
               type: "input",
               title: "New Note",
               placeholder: "Note name",
+              withTemplates: true,
+              onConfirm: async (name, template, answers) => {
+                setDialog(null);
+                await onCreateNote(rootDir, name, template, answers);
+              },
+            });
+          },
+        },
+        {
+          label: "New Drawing",
+          onClick: () => {
+            setDialog({
+              type: "input",
+              title: "New Drawing",
+              placeholder: "Drawing name",
               onConfirm: async (name) => {
                 setDialog(null);
-                await onCreateNote(rootDir, name);
+                await onCreateDrawing(rootDir, name);
               },
             });
           },
@@ -306,9 +378,25 @@ export default function TreeView({
               type: "input",
               title: "New Note",
               placeholder: "Note name",
+              withTemplates: true,
+              onConfirm: async (name, template, answers) => {
+                setDialog(null);
+                await onCreateNote(node.path, name, template, answers);
+                setExpandedPaths((prev) => new Set(prev).add(node.path));
+              },
+            });
+          },
+        },
+        {
+          label: "New Drawing",
+          onClick: () => {
+            setDialog({
+              type: "input",
+              title: "New Drawing",
+              placeholder: "Drawing name",
               onConfirm: async (name) => {
                 setDialog(null);
-                await onCreateNote(node.path, name);
+                await onCreateDrawing(node.path, name);
                 setExpandedPaths((prev) => new Set(prev).add(node.path));
               },
             });
@@ -401,7 +489,7 @@ export default function TreeView({
         },
       },
     ];
-  }, [contextMenu, rootDir, onCreateNote, onCreateFolder, onDelete, startRename]);
+  }, [contextMenu, rootDir, onCreateNote, onCreateFolder, onCreateDrawing, onDelete, startRename]);
 
   // Build folder list for move dialog, excluding the source's own subtree
   const getMoveTargetFolders = useCallback(
@@ -417,6 +505,7 @@ export default function TreeView({
 
   return (
     <div
+      ref={containerRef}
       className="flex-1 overflow-y-auto py-1"
       onContextMenu={handleRootContextMenu}
     >
@@ -450,6 +539,7 @@ export default function TreeView({
           depth={0}
           selectedPath={selectedPath}
           expandedPaths={expandedPaths}
+          highlightPath={highlightPath}
           toggleExpand={toggleExpand}
           onSelectNote={onSelectNote}
           onContextMenu={handleContextMenu}
@@ -474,6 +564,7 @@ export default function TreeView({
         <InputDialog
           title={dialog.title}
           placeholder={dialog.placeholder}
+          withTemplates={dialog.withTemplates}
           onConfirm={dialog.onConfirm}
           onCancel={() => setDialog(null)}
         />

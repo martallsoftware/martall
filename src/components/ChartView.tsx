@@ -29,9 +29,13 @@ export interface ChartSpec {
   kind: "line" | "bar" | "area";
   title?: string;
   labels: (string | number)[];
-  series: { name: string; data: number[]; color?: string }[];
+  series: { name: string; data: (number | null)[]; color?: string }[];
   yLabel?: string;
   xLabel?: string;
+  /** Stack bar series on top of each other instead of side by side. */
+  stacked?: boolean;
+  /** Counts: y axis starts at 0 with whole-number ticks. */
+  integer?: boolean;
 }
 
 const PALETTE = [
@@ -42,9 +46,10 @@ const PALETTE = [
 interface Props {
   spec: ChartSpec;
   dark?: boolean;
+  height?: number;
 }
 
-export default function ChartView({ spec, dark = true }: Props) {
+export default function ChartView({ spec, dark = true, height = 260 }: Props) {
   const grid = dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)";
   const text = dark ? "#cbd5e1" : "#334155";
 
@@ -65,6 +70,7 @@ export default function ChartView({ spec, dark = true }: Props) {
                 : color,
           fill: spec.kind === "area",
           tension: 0.25,
+          spanGaps: true,
           pointRadius: spec.kind === "line" || spec.kind === "area" ? 2 : 0,
           borderWidth: 2,
         };
@@ -89,6 +95,7 @@ export default function ChartView({ spec, dark = true }: Props) {
       },
       scales: {
         x: {
+          stacked: !!spec.stacked,
           ticks: { color: text, maxRotation: 0, autoSkip: true },
           grid: { color: grid },
           title: spec.xLabel
@@ -96,7 +103,9 @@ export default function ChartView({ spec, dark = true }: Props) {
             : { display: false },
         },
         y: {
-          ticks: { color: text },
+          stacked: !!spec.stacked,
+          beginAtZero: !!spec.integer,
+          ticks: { color: text, ...(spec.integer ? { precision: 0 } : {}) },
           grid: { color: grid },
           title: spec.yLabel
             ? { display: true, text: spec.yLabel, color: text }
@@ -108,7 +117,7 @@ export default function ChartView({ spec, dark = true }: Props) {
   );
 
   return (
-    <div style={{ height: 260 }}>
+    <div style={{ height }}>
       {spec.kind === "bar" ? (
         <Bar data={data} options={options} />
       ) : (

@@ -194,6 +194,16 @@ fn migrate(conn: &Connection) {
         }
     }
 
+    // v1: every checkbox task is indexed, not only ones with a due date.
+    // Force one re-sync so existing notes get their undated tasks extracted.
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap_or(0);
+    if version < 1 {
+        let _ = conn.execute("UPDATE notes SET modified_at = 0", []);
+        let _ = conn.execute_batch("PRAGMA user_version = 1");
+    }
+
     // Same idea for task due dates (`📅` marker on checkbox lines).
     let tasks_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM task_dates", [], |r| r.get(0))
@@ -260,11 +270,12 @@ pub struct ExtractedTask {
     pub text: String,
 }
 
-/// Extract task lines (`- [ ] … 📅 YYYY-MM-DD`) with their due dates.
-/// Only checkbox lines (`- [ ]` / `- [x]`) carrying a `📅 <date>` marker
-/// are returned. The date marker is stripped from `text`.
+/// Extract checkbox task lines (`- [ ]`, `- [/]` in progress, `- [x]` done,
+/// `- [-]` cancelled; done and cancelled count as closed). `due_date` is the
+/// `📅 YYYY-MM-DD` marker, or empty when there is none. The date marker is
+/// stripped from `text`.
 pub fn extract_task_dates(content: &str) -> Vec<ExtractedTask> {
-    let checkbox_re = Regex::new(r"^\s*[-*]\s*\[([ xX])\]\s*(.*)$").unwrap();
+    let checkbox_re = Regex::new(r"^\s*[-*]\s*\[([ xX/-])\]\s*(.*)$").unwrap();
     let date_re = Regex::new(r"📅\s*(\d{4})-(\d{2})-(\d{2})").unwrap();
     let mut out = Vec::new();
     for (i, line) in content.lines().enumerate() {
@@ -274,22 +285,27 @@ pub fn extract_task_dates(content: &str) -> Vec<ExtractedTask> {
         };
         let status = cap.get(1).map(|m| m.as_str()).unwrap_or(" ");
         let rest = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-        let date_cap = match date_re.captures(rest) {
-            Some(c) => c,
-            None => continue,
+        let due_date = match date_re.captures(rest) {
+            Some(date_cap) => {
+                let y: i32 = date_cap[1].parse().unwrap_or(0);
+                let m: u32 = date_cap[2].parse().unwrap_or(0);
+                let d: u32 = date_cap[3].parse().unwrap_or(0);
+                if y < 1900 || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+                    String::new()
+                } else {
+                    format!("{:04}-{:02}-{:02}", y, m, d)
+                }
+            }
+            None => String::new(),
         };
-        let y: i32 = date_cap[1].parse().unwrap_or(0);
-        let m: u32 = date_cap[2].parse().unwrap_or(0);
-        let d: u32 = date_cap[3].parse().unwrap_or(0);
-        if y < 1900 || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        let text = date_re.replace_all(rest, "").trim().to_string();
+        if text.is_empty() && due_date.is_empty() {
             continue;
         }
-        let due_date = format!("{:04}-{:02}-{:02}", y, m, d);
-        let text = date_re.replace_all(rest, "").trim().to_string();
         out.push(ExtractedTask {
             line_index: i as i64,
             due_date,
-            done: matches!(status, "x" | "X"),
+            done: matches!(status, "x" | "X" | "-"),
             text,
         });
     }
@@ -339,7 +355,38 @@ fn rel_path(file_path: &Path, notes_dir: &Path) -> Option<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
-/// Full sync: scan all .md files, index new/changed, remove deleted
+/// File extension of Excalidraw drawings stored in the vault.
+pub const DRAWING_EXT: &str = "excalidraw";
+
+/// Notes (`.md`) and drawings (`.excalidraw`) are both indexed.
+pub fn is_indexable(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "md" || ext == DRAWING_EXT)
+}
+
+/// Text to index for a file: markdown as-is; for a drawing, the text of its
+/// live elements (one per line), so drawings are searchable and linkable
+/// without indexing colours like `#dcfce7` as tags.
+pub fn index_text(path: &Path, content: &str) -> String {
+    if !path.extension().is_some_and(|ext| ext == DRAWING_EXT) {
+        return content.to_string();
+    }
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(content) else {
+        return String::new();
+    };
+    doc.get("elements")
+        .and_then(|e| e.as_array())
+        .map(|els| {
+            els.iter()
+                .filter(|el| !el.get("isDeleted").and_then(|d| d.as_bool()).unwrap_or(false))
+                .filter_map(|el| el.get("text").and_then(|t| t.as_str()))
+                .filter(|t| !t.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// Full sync: scan all notes and drawings, index new/changed, remove deleted
 pub fn sync_index(conn: &Connection, notes_dir: &str) {
     let root = Path::new(notes_dir);
     let mut seen_paths: HashSet<String> = HashSet::new();
@@ -348,7 +395,7 @@ pub fn sync_index(conn: &Connection, notes_dir: &str) {
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+        .filter(|e| is_indexable(e.path()))
     {
         let path = entry.path();
 
@@ -380,7 +427,7 @@ pub fn sync_index(conn: &Connection, notes_dir: &str) {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
-                upsert_note(conn, &rp, &title, &content, mtime);
+                upsert_note(conn, &rp, &title, &index_text(path, &content), mtime);
             }
         }
     }
@@ -862,12 +909,13 @@ pub fn get_due_tasks(
         "SELECT n.rel_path, n.title, td.line_index, td.due_date, td.done, td.text
          FROM task_dates td
          JOIN notes n ON n.id = td.note_id
+         WHERE td.due_date <> ''
          ORDER BY td.done ASC, td.due_date ASC"
     } else {
         "SELECT n.rel_path, n.title, td.line_index, td.due_date, td.done, td.text
          FROM task_dates td
          JOIN notes n ON n.id = td.note_id
-         WHERE td.done = 0
+         WHERE td.done = 0 AND td.due_date <> ''
          ORDER BY td.due_date ASC"
     };
     let mut stmt = match conn.prepare(sql) {
@@ -879,6 +927,35 @@ pub fn get_due_tasks(
         let full_path = root.join(&rp).to_string_lossy().to_string();
         Ok(TaskItem {
             note_path: full_path,
+            note_title: row.get(1)?,
+            line_index: row.get(2)?,
+            due_date: row.get(3)?,
+            done: row.get::<_, i64>(4)? != 0,
+            text: row.get(5)?,
+        })
+    })
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
+}
+
+/// Every indexed task for the task charts, dated or not. Tasks in the
+/// templates folder and in `#routine` notes (which have their own history)
+/// are left out.
+pub fn get_all_tasks(conn: &Connection, notes_dir: &str, templates_folder: &str) -> Vec<TaskItem> {
+    let root = Path::new(notes_dir);
+    let mut stmt = match conn.prepare(
+        "SELECT n.rel_path, n.title, td.line_index, td.due_date, td.done, td.text
+         FROM task_dates td
+         JOIN notes n ON n.id = td.note_id
+         WHERE n.rel_path NOT LIKE ?1 AND n.content NOT LIKE '%#routine%'",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    stmt.query_map(params![format!("{}/%", templates_folder)], |row| {
+        let rp: String = row.get(0)?;
+        Ok(TaskItem {
+            note_path: root.join(&rp).to_string_lossy().to_string(),
             note_title: row.get(1)?,
             line_index: row.get(2)?,
             due_date: row.get(3)?,
@@ -945,11 +1022,18 @@ fn resolve_target(
         return None;
     }
 
+    // `[[Name.excalidraw]]` names a drawing explicitly (a note may share its title).
+    let drawing_suffix = format!(".{}", DRAWING_EXT);
+    let drawing_only = target.to_lowercase().ends_with(&drawing_suffix);
+    let target = if drawing_only { &target[..target.len() - drawing_suffix.len()] } else { target };
+
     if target.contains('/') || target.contains('\\') {
-        let candidates: Vec<String> = if target.ends_with(".md") {
+        let candidates: Vec<String> = if drawing_only {
+            vec![format!("{}{}", target, drawing_suffix)]
+        } else if target.ends_with(".md") {
             vec![target.to_string()]
         } else {
-            vec![format!("{}.md", target), target.to_string()]
+            vec![format!("{}.md", target), target.to_string(), format!("{}{}", target, drawing_suffix)]
         };
         for c in &candidates {
             if let Ok(rp) = conn.query_row(
@@ -970,6 +1054,7 @@ fn resolve_target(
         .query_map(params![target], |row| row.get::<_, String>(0))
         .ok()?
         .filter_map(|r| r.ok())
+        .filter(|rp: &String| !drawing_only || rp.to_lowercase().ends_with(&drawing_suffix))
         .collect();
 
     if matches.is_empty() {
@@ -1082,4 +1167,37 @@ pub fn get_note_tags(conn: &Connection, notes_dir: &str, note_path: &str) -> Vec
         .unwrap()
         .filter_map(|r| r.ok())
         .collect()
+}
+
+#[cfg(test)]
+mod drawing_tests {
+    use super::*;
+
+    #[test]
+    fn indexes_drawing_text_only() {
+        let json = r##"{"type":"excalidraw","elements":[
+            {"type":"rectangle","backgroundColor":"#dcfce7"},
+            {"type":"text","text":"Hermes worker"},
+            {"type":"text","text":"old","isDeleted":true},
+            {"type":"text","text":"see [[Fluxa]] #pipeline"}]}"##;
+        let t = index_text(Path::new("a/Diagram.excalidraw"), json);
+        assert_eq!(t, "Hermes worker\nsee [[Fluxa]] #pipeline");
+        assert_eq!(index_text(Path::new("x.md"), "#tag"), "#tag");
+        assert_eq!(index_text(Path::new("bad.excalidraw"), "not json"), "");
+    }
+}
+
+#[cfg(test)]
+mod task_tests {
+    use super::*;
+
+    #[test]
+    fn extracts_all_task_statuses() {
+        let md = "- [ ] open 📅 2026-10-19\n- [/] doing 🔼 📅 2026-10-20\n- [x] done 📅 2026-10-01 ✅ 2026-10-02\n- [-] dropped 📅 2026-10-03 ❌ 2026-10-03\n- [ ] no date\n";
+        let t = extract_task_dates(md);
+        let summary: Vec<(i64, bool)> = t.iter().map(|t| (t.line_index, t.done)).collect();
+        assert_eq!(summary, vec![(0, false), (1, false), (2, true), (3, true), (4, false)]);
+        assert_eq!(t[4].due_date, "");
+        assert_eq!(t[1].text, "doing 🔼");
+    }
 }
