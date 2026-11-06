@@ -130,6 +130,39 @@ Track: weight (kg) · waist (cm) · sleep (h) · steps
   line under `## Log` (newest first); saving again the same day updates it.
 - Below the note, **History** draws one chart per metric.
 
+### Drawings (Excalidraw)
+A drawing page for diagrams in the style of Visio: boxes, arrows that stick to
+shapes, text, freehand pen, images and frames. Each drawing is saved in the
+vault as `Name.excalidraw` (plain JSON, the same format excalidraw.com and the
+Obsidian Excalidraw plugin use).
+
+- **New:** right-click in the tree → **New Drawing**.
+- **Library** (top right) has extra shapes in the four diagram colours
+  (green = ready, amber dashed = to do, grey dashed = external, blue = records):
+  process box, database cylinder, document, files (stack) and a group frame.
+  Shapes you add to the library yourself are remembered.
+- **Import Mermaid** (top right, or the ☰ menu) turns a Mermaid flowchart,
+  sequence, class, ER or state diagram into editable shapes. Subgraphs,
+  `classDef` colours, dashed and thick links, link labels and `linkStyle` are
+  kept. Cylinders and document shapes become boxes, so swap in the library
+  shapes if you want them.
+- In a note's preview, hover over a Mermaid diagram and click **✏️ Edit as
+  drawing**. This creates `<note> diagram.excalidraw` next to the note and
+  opens it. Clicking it again on the same Mermaid code reopens that drawing
+  (with your edits) instead of making a copy; changed Mermaid code gets a new
+  drawing. Drawings save automatically. When you **Close** (or go **Back**),
+  you choose: **Replace Mermaid with drawing** (the block becomes
+  `![[<note> diagram]]`), **Add drawing below**, or **Just close**.
+- **Show a drawing in a note** with `![[Name]]` (or `![[Name.excalidraw]]`).
+  Double-click the picture, or click **Open drawing**, to edit it.
+  `[[Name]]` links to it like a normal note.
+- Text in drawings is indexed, so search, `#tags` and `[[links]]` inside a
+  drawing work.
+- **Back / Close:** the header shows **‹ Back** (to the note you came from)
+  and, on a drawing, **✕ Close**. In notes, ⌘[ also goes back.
+- **Export:** ☰ → *Export image…* → *Copy to clipboard* (PNG), then paste
+  anywhere.
+
 ### UI
 - **Movable split divider** between editor and preview. Drag to resize,
   double-click to reset to 50/50. The ratio is persisted to settings.

@@ -78,15 +78,17 @@ export function useNote(onAfterSave?: () => void) {
   }, []);
 
   const updateContent = useCallback((content: string) => {
+    // Capture the path now: if another note opens before the timer fires,
+    // the edit must still go to the note it was made in.
+    const path = noteRef.current?.path;
     setNote((prev) => (prev ? { ...prev, content } : null));
 
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
-      const current = noteRef.current;
-      if (current) {
+      if (path) {
         setSaving(true);
         try {
-          await invoke("save_note", { path: current.path, content });
+          await invoke("save_note", { path, content });
           onAfterSaveRef.current?.();
         } catch (err) {
           console.error("Failed to save note:", err);

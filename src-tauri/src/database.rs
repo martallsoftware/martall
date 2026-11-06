@@ -355,7 +355,38 @@ fn rel_path(file_path: &Path, notes_dir: &Path) -> Option<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
-/// Full sync: scan all .md files, index new/changed, remove deleted
+/// File extension of Excalidraw drawings stored in the vault.
+pub const DRAWING_EXT: &str = "excalidraw";
+
+/// Notes (`.md`) and drawings (`.excalidraw`) are both indexed.
+pub fn is_indexable(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "md" || ext == DRAWING_EXT)
+}
+
+/// Text to index for a file: markdown as-is; for a drawing, the text of its
+/// live elements (one per line), so drawings are searchable and linkable
+/// without indexing colours like `#dcfce7` as tags.
+pub fn index_text(path: &Path, content: &str) -> String {
+    if !path.extension().is_some_and(|ext| ext == DRAWING_EXT) {
+        return content.to_string();
+    }
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(content) else {
+        return String::new();
+    };
+    doc.get("elements")
+        .and_then(|e| e.as_array())
+        .map(|els| {
+            els.iter()
+                .filter(|el| !el.get("isDeleted").and_then(|d| d.as_bool()).unwrap_or(false))
+                .filter_map(|el| el.get("text").and_then(|t| t.as_str()))
+                .filter(|t| !t.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// Full sync: scan all notes and drawings, index new/changed, remove deleted
 pub fn sync_index(conn: &Connection, notes_dir: &str) {
     let root = Path::new(notes_dir);
     let mut seen_paths: HashSet<String> = HashSet::new();
@@ -364,7 +395,7 @@ pub fn sync_index(conn: &Connection, notes_dir: &str) {
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+        .filter(|e| is_indexable(e.path()))
     {
         let path = entry.path();
 
@@ -396,7 +427,7 @@ pub fn sync_index(conn: &Connection, notes_dir: &str) {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
-                upsert_note(conn, &rp, &title, &content, mtime);
+                upsert_note(conn, &rp, &title, &index_text(path, &content), mtime);
             }
         }
     }
@@ -991,11 +1022,18 @@ fn resolve_target(
         return None;
     }
 
+    // `[[Name.excalidraw]]` names a drawing explicitly (a note may share its title).
+    let drawing_suffix = format!(".{}", DRAWING_EXT);
+    let drawing_only = target.to_lowercase().ends_with(&drawing_suffix);
+    let target = if drawing_only { &target[..target.len() - drawing_suffix.len()] } else { target };
+
     if target.contains('/') || target.contains('\\') {
-        let candidates: Vec<String> = if target.ends_with(".md") {
+        let candidates: Vec<String> = if drawing_only {
+            vec![format!("{}{}", target, drawing_suffix)]
+        } else if target.ends_with(".md") {
             vec![target.to_string()]
         } else {
-            vec![format!("{}.md", target), target.to_string()]
+            vec![format!("{}.md", target), target.to_string(), format!("{}{}", target, drawing_suffix)]
         };
         for c in &candidates {
             if let Ok(rp) = conn.query_row(
@@ -1016,6 +1054,7 @@ fn resolve_target(
         .query_map(params![target], |row| row.get::<_, String>(0))
         .ok()?
         .filter_map(|r| r.ok())
+        .filter(|rp: &String| !drawing_only || rp.to_lowercase().ends_with(&drawing_suffix))
         .collect();
 
     if matches.is_empty() {
@@ -1128,6 +1167,24 @@ pub fn get_note_tags(conn: &Connection, notes_dir: &str, note_path: &str) -> Vec
         .unwrap()
         .filter_map(|r| r.ok())
         .collect()
+}
+
+#[cfg(test)]
+mod drawing_tests {
+    use super::*;
+
+    #[test]
+    fn indexes_drawing_text_only() {
+        let json = r##"{"type":"excalidraw","elements":[
+            {"type":"rectangle","backgroundColor":"#dcfce7"},
+            {"type":"text","text":"Hermes worker"},
+            {"type":"text","text":"old","isDeleted":true},
+            {"type":"text","text":"see [[Fluxa]] #pipeline"}]}"##;
+        let t = index_text(Path::new("a/Diagram.excalidraw"), json);
+        assert_eq!(t, "Hermes worker\nsee [[Fluxa]] #pipeline");
+        assert_eq!(index_text(Path::new("x.md"), "#tag"), "#tag");
+        assert_eq!(index_text(Path::new("bad.excalidraw"), "not json"), "");
+    }
 }
 
 #[cfg(test)]

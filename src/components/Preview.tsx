@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useRef } from "react";
+import { lazy, Suspense, useMemo, useState, useEffect, useRef } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { invoke } from "@tauri-apps/api/core";
@@ -14,6 +14,10 @@ import TaskDialog from "./TaskDialog";
 import { applyTaskEdit, parseTaskLine, toggleTaskDone, type Task } from "../utils/task";
 import { todayIso } from "../utils/routine";
 import type { NoteInfo } from "../types";
+import { isDrawingPath } from "../utils/drawing";
+
+// Excalidraw is large; only load it when a note embeds a drawing.
+const DrawingEmbed = lazy(() => import("./DrawingEmbed"));
 
 interface Props {
   content: string;
@@ -22,6 +26,8 @@ interface Props {
   onOpenNote?: (path: string) => void;
   /** When set, task checkboxes are clickable and write the toggled markdown back. */
   onContentChange?: (content: string) => void;
+  /** When set, mermaid blocks get an "Edit as drawing" button. */
+  onMermaidToDrawing?: (code: string) => Promise<void>;
 }
 
 /** `- [ ] text` / `1. [x] text` (optionally inside a blockquote). Groups: prefix, mark. */
@@ -42,6 +48,7 @@ function toggleTaskLine(md: string, lineIdx: number): string | null {
  * Remark plugin: rewrites `[[Target]]` and `[[Target|Display]]` text spans
  * into link nodes with `url = "wiki:<target>"`. The `a` component handler
  * below detects the `wiki:` prefix and routes the click through `onOpenNote`.
+ * `![[Target]]` becomes `wikiembed:<target>` (rendered inline for drawings).
  * Nodes without `children` (code, inlineCode) are untouched.
  */
 const WIKI_LINK_RE = /\[\[([^\]\n]+?)\]\]/g;
@@ -62,8 +69,10 @@ function remarkWikiLinks() {
         let m: RegExpExecArray | null;
         while ((m = WIKI_LINK_RE.exec(text)) !== null) {
           matched = true;
-          if (m.index > last) {
-            out.push({ type: "text", value: text.slice(last, m.index) });
+          const embed = m.index > last && text[m.index - 1] === "!";
+          const before = text.slice(last, embed ? m.index - 1 : m.index);
+          if (before) {
+            out.push({ type: "text", value: before });
           }
           const raw = m[1];
           const pipe = raw.indexOf("|");
@@ -71,7 +80,7 @@ function remarkWikiLinks() {
           const display = (pipe >= 0 ? raw.slice(pipe + 1) : raw).trim();
           out.push({
             type: "link",
-            url: "wiki:" + target,
+            url: (embed ? "wikiembed:" : "wiki:") + target,
             title: null,
             children: [{ type: "text", value: display }],
           });
@@ -469,7 +478,7 @@ function renderWithTags(children: React.ReactNode): React.ReactNode {
   return children;
 }
 
-export default function Preview({ content, notePath, darkMode = true, onOpenNote, onContentChange }: Props) {
+export default function Preview({ content, notePath, darkMode = true, onOpenNote, onContentChange, onMermaidToDrawing }: Props) {
   const noteDir = useMemo(() => {
     if (!notePath) return null;
     const lastSlash = Math.max(notePath.lastIndexOf("/"), notePath.lastIndexOf("\\"));
@@ -639,7 +648,13 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
               const cls = className || "";
               if (/language-mermaid/.test(cls)) {
                 const chart = String(children).replace(/\n$/, "");
-                return <MermaidBlock chart={chart} dark={darkMode} />;
+                return (
+                  <MermaidBlock
+                    chart={chart}
+                    dark={darkMode}
+                    onEditAsDrawing={onMermaidToDrawing ? () => onMermaidToDrawing(chart) : undefined}
+                  />
+                );
               }
               if (/language-lua-live/.test(cls)) {
                 const code = String(children).replace(/\n$/, "");
@@ -667,6 +682,23 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
               return <pre>{children}</pre>;
             },
             a: ({ href, children }) => {
+              if (href && href.startsWith("wikiembed:")) {
+                const target = href.slice(10);
+                const resolved = wikiResolved[target];
+                if (typeof resolved === "string" && isDrawingPath(resolved)) {
+                  return (
+                    <Suspense fallback={<span className="text-xs text-gray-400">Loading drawing…</span>}>
+                      <DrawingEmbed
+                        path={resolved}
+                        title={target}
+                        dark={darkMode}
+                        onOpen={onOpenNote ? () => onOpenNote(resolved) : undefined}
+                      />
+                    </Suspense>
+                  );
+                }
+                href = "wiki:" + target;
+              }
               if (href && href.startsWith("wiki:")) {
                 const target = href.slice(5);
                 const resolved = wikiResolved[target];

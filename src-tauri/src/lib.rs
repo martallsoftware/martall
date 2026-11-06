@@ -104,8 +104,8 @@ fn build_tree(dir: &Path) -> Vec<TreeNode> {
                 is_folder: true,
                 children,
             });
-        } else if path.extension().is_some_and(|e| e == "md") {
-            let display_name = name.strip_suffix(".md").unwrap_or(&name).to_string();
+        } else if database::is_indexable(&path) {
+            let display_name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
             files.push(TreeNode {
                 name: display_name,
                 path: path.to_string_lossy().to_string(),
@@ -287,9 +287,37 @@ fn save_note(state: State<'_, AppState>, path: String, content: String) -> Resul
             .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
             .unwrap_or(0);
         let db = state.db.lock().unwrap();
-        database::upsert_note(&db, &rp_str, &title, &content, mtime);
+        database::upsert_note(&db, &rp_str, &title, &database::index_text(Path::new(&path), &content), mtime);
     }
     Ok(())
+}
+
+/// Create `<name>.excalidraw` in `parent_dir` with the given scene JSON.
+#[tauri::command]
+fn create_drawing(
+    state: State<'_, AppState>,
+    parent_dir: String,
+    name: String,
+    content: String,
+) -> Result<String, String> {
+    let ext = format!(".{}", database::DRAWING_EXT);
+    let stem = name.trim().trim_end_matches(ext.as_str());
+    if stem.is_empty() || stem.contains('/') || stem.contains('\\') {
+        return Err("Invalid drawing name".to_string());
+    }
+    let full_path = Path::new(&parent_dir).join(format!("{}{}", stem, ext));
+    if full_path.exists() {
+        return Err(format!("A drawing named '{}' already exists", stem));
+    }
+    fs::write(&full_path, &content).map_err(|e| e.to_string())?;
+
+    let settings = state.settings.lock().unwrap();
+    let root = Path::new(&settings.notes_directory);
+    if let Ok(rp) = full_path.strip_prefix(root) {
+        let db = state.db.lock().unwrap();
+        database::upsert_note(&db, &rp.to_string_lossy(), stem, &database::index_text(&full_path, &content), 0);
+    }
+    Ok(full_path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -626,10 +654,13 @@ fn rename_node(state: State<'_, AppState>, old_path: String, new_name: String) -
     let new_path = if old.is_dir() {
         parent.join(&new_name)
     } else {
-        let file_name = if new_name.ends_with(".md") {
+        // Keep the file's own extension (.md or .excalidraw).
+        let ext = old.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_else(|| "md".into());
+        let suffix = format!(".{}", ext);
+        let file_name = if new_name.ends_with(&suffix) {
             new_name.clone()
         } else {
-            format!("{}.md", new_name)
+            format!("{}{}", new_name, suffix)
         };
         parent.join(file_name)
     };
@@ -1538,6 +1569,7 @@ pub fn run() {
             save_note,
             create_folder,
             create_note,
+            create_drawing,
             list_templates,
             template_questions,
             rename_node,
