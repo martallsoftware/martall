@@ -139,7 +139,12 @@ Obsidian Excalidraw plugin use).
 - **New:** right-click in the tree → **New Drawing**.
 - **Library** (top right) has extra shapes in the four diagram colours
   (green = ready, amber dashed = to do, grey dashed = external, blue = records):
-  process box, database cylinder, document, files (stack) and a group frame.
+  process, database, storage (striped cylinder), queue / log (horizontal
+  cylinder), document, files (stack), folder, API (hexagon), decision,
+  start / end and a group frame. Developer extras in one colour (recolour
+  them in the properties panel): server / service, web app, mobile, user,
+  cloud, scheduled job, note, a colour legend, and ready-made request,
+  async (dashed) and numbered data-flow (thick green) arrows.
   Shapes you add to the library yourself are remembered.
 - **Import Mermaid** (top right, or the ☰ menu) turns a Mermaid flowchart,
   sequence, class, ER or state diagram into editable shapes. Subgraphs,
