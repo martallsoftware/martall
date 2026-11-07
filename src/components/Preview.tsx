@@ -1,5 +1,5 @@
 import { lazy, Suspense, useMemo, useState, useEffect, useRef } from "react";
-import Markdown from "react-markdown";
+import Markdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -102,6 +102,23 @@ function remarkWikiLinks() {
     node.children = out;
   };
   return (tree: { type?: string; children?: unknown[] }) => visit(tree);
+}
+
+/**
+ * react-markdown blanks links whose scheme isn't http(s)/mailto/…, which
+ * would wipe our internal `wiki:` / `wikiembed:` links; let those through.
+ */
+function urlTransform(url: string): string {
+  return url.startsWith("wiki:") || url.startsWith("wikiembed:") ? url : defaultUrlTransform(url);
+}
+
+/** Link targets arrive URL-encoded ("My%20Note"); match them by their real name. */
+function decodeTarget(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
 }
 
 /** Extract all unique `[[…]]` targets from raw markdown, ignoring code blocks. */
@@ -644,6 +661,7 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
       <div ref={contentRef} className="markdown-body text-gray-800 dark:text-gray-200 max-w-none">
         <Markdown
           remarkPlugins={[remarkGfm, remarkWikiLinks]}
+          urlTransform={urlTransform}
           components={{
             code: ({ className, children, ...props }) => {
               const cls = className || "";
@@ -684,7 +702,7 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
             },
             a: ({ href, children }) => {
               if (href && href.startsWith("wikiembed:")) {
-                const target = href.slice(10);
+                const target = decodeTarget(href.slice(10));
                 const resolved = wikiResolved[target];
                 if (typeof resolved === "string" && isDrawingPath(resolved)) {
                   return (
@@ -710,10 +728,10 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
                     </Suspense>
                   );
                 }
-                href = "wiki:" + target;
+                href = "wiki:" + encodeURIComponent(target);
               }
               if (href && href.startsWith("wiki:")) {
-                const target = href.slice(5);
+                const target = decodeTarget(href.slice(5));
                 const resolved = wikiResolved[target];
                 const broken = resolved === null;
                 return (

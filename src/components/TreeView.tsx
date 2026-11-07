@@ -106,6 +106,14 @@ function NoteIcon({ node }: { node: TreeNode }) {
   );
 }
 
+/** Path of the note New Note would have created (for "Open it" when the name is taken). */
+export function existingNotePath(dir: string, name: string, template?: string): string {
+  const mermaid = /\.mmd$/i.test(name) || /\.mmd$/i.test(template ?? "");
+  const stem = name.replace(/\.(md|mmd)$/i, "");
+  const sep = dir.includes("\\") && !dir.includes("/") ? "\\" : "/";
+  return `${dir.replace(/[\\/]+$/, "")}${sep}${stem}.${mermaid ? "mmd" : "md"}`;
+}
+
 /** Compare paths ignoring "\\" vs "/" and a trailing slash. */
 function samePath(a: string, b: string): boolean {
   const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
@@ -311,7 +319,8 @@ type DialogState =
       title: string;
       placeholder: string;
       withTemplates?: boolean;
-      onConfirm: (val: string, template?: string, answers?: Record<string, string>) => void;
+      onConfirm: (val: string, template?: string, answers?: Record<string, string>) => void | Promise<void>;
+      onOpenExisting?: (val: string, template?: string) => void;
     }
   | { type: "confirm"; title: string; message: string; onConfirm: () => void }
   | { type: "move"; sourcePath: string; sourceName: string };
@@ -469,8 +478,13 @@ export default function TreeView({
               placeholder: "Note name",
               withTemplates: true,
               onConfirm: async (name, template, answers) => {
-                setDialog(null);
+                // Close only once created: an error (name taken) keeps the dialog open.
                 await onCreateNote(rootDir, name, template, answers);
+                setDialog(null);
+              },
+              onOpenExisting: (name, template) => {
+                setDialog(null);
+                onSelectNote(existingNotePath(rootDir, name, template));
               },
             });
           },
@@ -521,9 +535,13 @@ export default function TreeView({
               placeholder: "Note name",
               withTemplates: true,
               onConfirm: async (name, template, answers) => {
-                setDialog(null);
                 await onCreateNote(node.path, name, template, answers);
+                setDialog(null);
                 setExpandedPaths((prev) => new Set(prev).add(node.path));
+              },
+              onOpenExisting: (name, template) => {
+                setDialog(null);
+                onSelectNote(existingNotePath(node.path, name, template));
               },
             });
           },
@@ -709,6 +727,7 @@ export default function TreeView({
           placeholder={dialog.placeholder}
           withTemplates={dialog.withTemplates}
           onConfirm={dialog.onConfirm}
+          onOpenExisting={dialog.onOpenExisting}
           onCancel={() => setDialog(null)}
         />
       )}

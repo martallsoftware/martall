@@ -162,7 +162,18 @@ Obsidian Excalidraw plugin use).
   `![[<note> diagram]]`), **Add drawing below**, or **Just close**.
 - **Show a drawing in a note** with `![[Name]]` (or `![[Name.excalidraw]]`).
   Double-click the picture, or click **Open drawing**, to edit it.
-  `[[Name]]` links to it like a normal note.
+  `[[Name]]` links to it like a normal note. The **Insert drawing** button in
+  the editor toolbar lists your drawings (with search) or creates a new one
+  next to the note, and inserts the `![[…]]` line for you.
+- **White card:** click **▢ White card** on any drawing preview to show
+  previews as a light picture on white (like Obsidian) instead of following
+  the app theme; **◐ Theme** switches back. The choice applies to all previews.
+- **Obsidian vaults:** drawings made by the Obsidian Excalidraw plugin
+  (`Name.excalidraw.md`) are recognised in place: they show as drawings in the
+  tree, work in `![[Name.excalidraw]]` / `![[Name]]`, and open in the drawing
+  editor. Saving writes back in Obsidian's format and only changes the drawing
+  data and its text list; front matter, tags, your notes and *Embedded Files*
+  are kept. (Embedded images stay in Obsidian and show as empty boxes here.)
 - Text in drawings is indexed, so search, `#tags` and `[[links]]` inside a
   drawing work.
 - **Back / Close:** the header shows **‹ Back** (to the note you came from)

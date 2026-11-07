@@ -127,7 +127,7 @@ fn build_tree(dir: &Path, ctx: &TreeCtx) -> Vec<TreeNode> {
                 weight,
             });
         } else if database::is_indexable(&path) {
-            let display_name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            let display_name = database::note_title(&path);
             // Not indexed yet (just created elsewhere): work out the kind from the path alone.
             let kind = ctx.kinds.get(&key).cloned().unwrap_or_else(|| database::note_kind(&key, "").to_string());
             files.push(TreeNode {
@@ -373,11 +373,7 @@ fn save_note(state: State<'_, AppState>, path: String, content: String) -> Resul
     let root = Path::new(&settings.notes_directory);
     if let Ok(rp) = Path::new(&path).strip_prefix(root) {
         let rp_str = rp.to_string_lossy().to_string();
-        let title = Path::new(&path)
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+        let title = database::note_title(Path::new(&path));
         let mtime = fs::metadata(&path)
             .and_then(|m| m.modified())
             .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
@@ -777,9 +773,12 @@ fn rename_node(state: State<'_, AppState>, old_path: String, new_name: String) -
     let new_path = if old.is_dir() {
         parent.join(&new_name)
     } else {
-        // Keep the file's own extension (.md or .excalidraw).
-        let ext = old.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_else(|| "md".into());
-        let suffix = format!(".{}", ext);
+        // Keep the file's own extension (.md, .excalidraw, .mmd, or Obsidian's .excalidraw.md).
+        let suffix = if database::is_obsidian_drawing(old) {
+            database::OBSIDIAN_DRAWING_SUFFIX.to_string()
+        } else {
+            format!(".{}", old.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_else(|| "md".into()))
+        };
         let file_name = if new_name.ends_with(&suffix) {
             new_name.clone()
         } else {
@@ -795,7 +794,7 @@ fn rename_node(state: State<'_, AppState>, old_path: String, new_name: String) -
     let root = Path::new(&settings.notes_directory);
     if let (Ok(old_rp), Ok(new_rp)) = (old.strip_prefix(root), new_path.strip_prefix(root)) {
         let db = state.db.lock().unwrap();
-        let new_title = new_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let new_title = database::note_title(&new_path);
         database::rename_note_index(&db, &old_rp.to_string_lossy(), &new_rp.to_string_lossy(), &new_title);
     }
     rekey_weights(root, &rel_key(root, old), Some(&rel_key(root, &new_path)));
