@@ -165,6 +165,10 @@ Obsidian Excalidraw plugin use).
   `[[Name]]` links to it like a normal note. The **Insert drawing** button in
   the editor toolbar lists your drawings (with search) or creates a new one
   next to the note, and inserts the `![[…]]` line for you.
+- **Size:** add a size after `|`, as in Obsidian: `![[Name|300]]` (300 px
+  wide), `![[Name|300x200]]` (fits in 300 × 200, keeps its shape) or
+  `![[Name|50%]]`. Sized previews show just the picture; hover it for
+  *White card* / *Open*. Works for drawings and `.mmd` diagrams.
 - **White card:** click **▢ White card** on any drawing preview to show
   previews as a light picture on white (like Obsidian) instead of following
   the app theme; **◐ Theme** switches back. The choice applies to all previews.
@@ -191,6 +195,17 @@ Obsidian Excalidraw plugin use).
     the **Library** panel and are remembered. **Browse libraries** in the
     Library panel opens that site in your browser; click *Download* there and
     drop the file on the app.
+- **Pages:** one drawing can hold several pages. Each page is an Excalidraw
+  *frame*, so the file still opens normally on excalidraw.com and in Obsidian
+  (pages side by side on the canvas).
+  - **▤ Pages** (top right) lists them: click to jump there, double-click to
+    rename, ↑ ↓ to reorder (pages are renumbered "1 …", "2 …"), **+ Add page**
+    adds a 16:9 page to the right. The first time, what is already drawn is
+    put on page 1.
+  - Show one page in a note: `![[Drawing#Data flow]]` or `![[Drawing#2]]`
+    (works with sizes too: `![[Drawing#2|600]]`).
+  - ☰ → Export → **PDF, one page per frame** gives a multi-page PDF (each A4
+    page cropped to its frame). **Present** steps through the pages as slides.
 - **Present:** **▶ Present** (top right, or ☰) shows the drawing read-only
   over the whole window, with a toolbar at the bottom:
   - **Laser pointer** (L, on by default): a red dot follows the pointer;

@@ -7,7 +7,9 @@ import {
   exportToSvg,
   MainMenu,
   getCommonBounds,
+  convertToExcalidrawElements,
   getSceneVersion,
+  newElementWith,
   restoreElements,
   serializeAsJSON,
 } from "@excalidraw/excalidraw";
@@ -19,7 +21,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import LaserOverlay from "./LaserOverlay";
 import "@excalidraw/excalidraw/index.css";
 import { drawingMeta, parseScene, withDrawingMeta } from "../utils/drawing";
-import { bytesToBase64, canvasToPdf } from "../utils/pdf";
+import { bytesToBase64, canvasesToPdf, canvasToPdf } from "../utils/pdf";
+import { pageElements, pageFrames, pageTitle } from "../utils/pages";
 import { builtinLibrary, DEFAULT_APP_STATE, mermaidToElements } from "../utils/drawingShapes";
 import {
   addToUserLibrary,
@@ -64,7 +67,7 @@ function withFreshIds(elements: readonly any[]): any[] {
   }));
 }
 
-type ExportKind = "excalidraw" | "obsidian" | "png" | "svg" | "pdf";
+type ExportKind = "excalidraw" | "obsidian" | "png" | "svg" | "pdf" | "pdf-pages";
 
 const EXPORTS: Record<ExportKind, { label: string; ext: string; suffix: string }> = {
   excalidraw: { label: "Excalidraw drawing", ext: "excalidraw", suffix: ".excalidraw" },
@@ -72,6 +75,13 @@ const EXPORTS: Record<ExportKind, { label: string; ext: string; suffix: string }
   png: { label: "PNG image", ext: "png", suffix: ".png" },
   svg: { label: "SVG image", ext: "svg", suffix: ".svg" },
   pdf: { label: "PDF document", ext: "pdf", suffix: ".pdf" },
+  "pdf-pages": { label: "PDF document", ext: "pdf", suffix: ".pdf" },
+};
+
+/** Up to 3× resolution, capped so huge drawings stay a sane file size. */
+const pdfDimensions = (w: number, h: number) => {
+  const scale = Math.max(1, Math.min(3, 6000 / Math.max(w, h)));
+  return { width: Math.round(w * scale), height: Math.round(h * scale), scale };
 };
 
 function blobToBase64(blob: Blob): Promise<string> {
@@ -89,19 +99,12 @@ function remeasure(api: ExcalidrawImperativeAPI) {
   api.refresh();
 }
 
-/**
- * Frames in slide order: by a leading number in their name when every frame
- * has one ("1 Intro", "2 Flow"…), otherwise reading order (rows, then left→right).
- */
-function slideFrames(elements: readonly any[]): any[] {
-  const frames = elements.filter((e) => (e.type === "frame" || e.type === "magicframe") && !e.isDeleted);
-  const num = (f: any) => parseFloat(String(f.name ?? "").match(/^\s*(\d+(?:\.\d+)?)/)?.[1] ?? "NaN");
-  if (frames.length > 1 && frames.every((f) => !Number.isNaN(num(f)))) {
-    return frames.sort((a, b) => num(a) - num(b));
-  }
-  const rowHeight = Math.max(100, Math.min(...frames.map((f) => f.height)) / 2);
-  return frames.sort((a, b) => Math.round(a.y / rowHeight) - Math.round(b.y / rowHeight) || a.x - b.x);
-}
+/** Frames are the pages (and the slides in Present). */
+const slideFrames = pageFrames;
+
+/** Default size for a new page: 16:9. */
+const PAGE_W = 1600;
+const PAGE_H = 900;
 
 interface Props {
   /** Drawing name, used as the default file name when exporting. */
@@ -147,8 +150,17 @@ export default function DrawingView({ name, content, darkMode, onChange, obsidia
   // Only write when something that is saved actually changed (not on every
   // pointer move / selection change, which also fire onChange).
   const lastKey = useRef<string | null>(null);
+  // Pages = frames; keep the list in state for the Pages panel.
+  const [pages, setPages] = useState<any[]>([]);
+  const pagesSig = useRef("");
   const handleChange = useCallback(
     (elements: readonly any[], appState: any, files: any) => {
+      const frames = pageFrames(elements);
+      const sig = frames.map((f) => `${f.id}:${f.name ?? ""}`).join("|");
+      if (sig !== pagesSig.current) {
+        pagesSig.current = sig;
+        setPages(frames);
+      }
       const key = `${getSceneVersion(elements)}|${Object.keys(files).length}|${appState.viewBackgroundColor}|${appState.gridSize}`;
       if (lastKey.current === null) {
         lastKey.current = key; // first call is the initial load
@@ -379,6 +391,111 @@ export default function DrawingView({ name, content, darkMode, onChange, obsidia
     return () => document.removeEventListener("click", onClick, true);
   }, [darkMode]);
 
+  // --- Pages panel ---
+  const [pagesOpen, setPagesOpen] = useState(() => {
+    try {
+      return localStorage.getItem("martall_pages_open") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const togglePages = () =>
+    setPagesOpen((v) => {
+      try {
+        localStorage.setItem("martall_pages_open", v ? "0" : "1");
+      } catch {
+        /* ignore */
+      }
+      return !v;
+    });
+  const [activePage, setActivePage] = useState(-1);
+
+  const gotoPage = useCallback((i: number) => {
+    const api = apiRef.current;
+    if (!api) return;
+    const frames = pageFrames(api.getSceneElements());
+    if (!frames[i]) return;
+    setActivePage(i);
+    api.scrollToContent(frames[i], { fitToViewport: true, viewportZoomFactor: 0.9, animate: true, duration: 300 });
+  }, []);
+
+  /** Replace frames' names in one undoable step. */
+  const renameFrames = useCallback((names: Map<string, string>) => {
+    const api = apiRef.current;
+    if (!api || names.size === 0) return;
+    api.updateScene({
+      elements: api.getSceneElementsIncludingDeleted().map((e: any) =>
+        names.has(e.id) && names.get(e.id) !== e.name ? newElementWith(e, { name: names.get(e.id) } as any) : e,
+      ),
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+    });
+  }, []);
+
+  const renamePage = useCallback(
+    (frame: any, title: string) => {
+      const num = String(frame.name ?? "").match(/^\s*(\d+(?:\.\d+)?)[.)]?\s*/)?.[1];
+      const clean = title.trim();
+      if (!clean) return;
+      renameFrames(new Map([[frame.id, num ? `${num} ${clean}` : clean]]));
+    },
+    [renameFrames],
+  );
+
+  /** Move a page up/down; pages are renumbered "1 …", "2 …" so the order sticks. */
+  const movePage = useCallback(
+    (i: number, dir: -1 | 1) => {
+      const api = apiRef.current;
+      if (!api) return;
+      const frames = pageFrames(api.getSceneElements());
+      const j = i + dir;
+      if (!frames[i] || !frames[j]) return;
+      const titles = new Map(frames.map((f, k) => [f.id, pageTitle(f, k)]));
+      const order = [...frames];
+      [order[i], order[j]] = [order[j], order[i]];
+      renameFrames(new Map(order.map((f, k) => [f.id, `${k + 1} ${titles.get(f.id)}`])));
+      setActivePage(j);
+    },
+    [renameFrames],
+  );
+
+  /**
+   * Add a page to the right of everything. The first time, what is already on
+   * the canvas is put on page 1 so nothing is left outside the pages.
+   */
+  const addPage = useCallback(() => {
+    const api = apiRef.current;
+    if (!api) return;
+    let all = [...api.getSceneElementsIncludingDeleted()] as any[];
+    const live = all.filter((e) => !e.isDeleted);
+    const frames = pageFrames(live);
+    const made: any[] = [];
+    const frameAt = (x: number, y: number, width: number, height: number, name: string) => {
+      const [f] = convertToExcalidrawElements([{ type: "frame", children: [], name } as any]);
+      return newElementWith(f as any, { x, y, width, height } as any);
+    };
+    let n = frames.length;
+    if (n === 0 && live.length > 0) {
+      // Page 1 is at least the standard 16:9 page, centred on what is there.
+      const [minX, minY, maxX, maxY] = getCommonBounds(live);
+      const pad = 40;
+      const w = Math.max(maxX - minX + 2 * pad, PAGE_W);
+      const h = Math.max(maxY - minY + 2 * pad, PAGE_H);
+      const first = frameAt((minX + maxX) / 2 - w / 2, (minY + maxY) / 2 - h / 2, w, h, "1 Page 1");
+      all = all.map((e) => (!e.isDeleted && !e.frameId ? newElementWith(e, { frameId: first.id } as any) : e));
+      made.push(first);
+      n = 1;
+    }
+    const pagesNow = [...frames, ...made];
+    const last = pagesNow[pagesNow.length - 1];
+    const right = live.length || made.length ? getCommonBounds([...live, ...made])[2] : 0;
+    const w = last ? last.width : PAGE_W;
+    const h = last ? last.height : PAGE_H;
+    made.push(frameAt(last ? right + 120 : 0, last ? last.y : 0, w, h, `${n + 1} Page ${n + 1}`));
+    api.updateScene({ elements: [...all, ...made], captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+    setPagesOpen(true);
+    setTimeout(() => gotoPage(pageFrames(api.getSceneElements()).length - 1), 50);
+  }, [gotoPage]);
+
   /** ☰ → Export: write the drawing (or a picture of it) to a file the user picks. */
   const exportAs = useCallback(
     async (kind: ExportKind) => {
@@ -402,17 +519,24 @@ export default function DrawingView({ name, content, darkMode, onChange, obsidia
         const imageState = { ...appState, exportBackground: true, exportWithDarkMode: darkMode, exportPadding: 20 };
         let contents: string;
         let base64 = false;
-        if (kind === "pdf") {
-          // Up to 3× resolution, capped so huge drawings stay a sane file size.
-          const canvas = await exportToCanvas({
-            elements,
-            appState: imageState,
-            files,
-            getDimensions: (w: number, h: number) => {
-              const scale = Math.max(1, Math.min(3, 6000 / Math.max(w, h)));
-              return { width: Math.round(w * scale), height: Math.round(h * scale), scale };
-            },
-          });
+        if (kind === "pdf-pages") {
+          // One A4 page per frame, each cropped to its frame.
+          const canvases: HTMLCanvasElement[] = [];
+          for (const frame of pageFrames(elements)) {
+            canvases.push(
+              await exportToCanvas({
+                elements: pageElements(elements, frame),
+                appState: imageState,
+                files,
+                exportingFrame: frame,
+                getDimensions: pdfDimensions,
+              }),
+            );
+          }
+          contents = bytesToBase64(await canvasesToPdf(canvases, name));
+          base64 = true;
+        } else if (kind === "pdf") {
+          const canvas = await exportToCanvas({ elements, appState: imageState, files, getDimensions: pdfDimensions });
           contents = bytesToBase64(await canvasToPdf(canvas, name));
           base64 = true;
         } else if (kind === "png") {
@@ -501,6 +625,17 @@ export default function DrawingView({ name, content, darkMode, onChange, obsidia
           presenting ? null : (
             <div className="flex gap-2">
               <button
+                onClick={togglePages}
+                className={`whitespace-nowrap px-3 py-1.5 text-xs rounded-lg border transition-colors ${
+                  pagesOpen
+                    ? "border-accent text-accent bg-accent/10"
+                    : "border-gray-300 dark:border-gray-600 bg-white dark:bg-[#232329] text-gray-700 dark:text-gray-200 hover:border-accent hover:text-accent"
+                }`}
+                title="Pages: each frame is a page"
+              >
+                ▤ Pages{pages.length ? ` (${pages.length})` : ""}
+              </button>
+              <button
                 onClick={() => setMermaidOpen(true)}
                 className="whitespace-nowrap px-3 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-[#232329] text-gray-700 dark:text-gray-200 hover:border-accent hover:text-accent transition-colors"
                 title="Convert Mermaid code into editable shapes"
@@ -536,6 +671,11 @@ export default function DrawingView({ name, content, darkMode, onChange, obsidia
             <MainMenu.Item onSelect={() => exportAs("png")}>PNG image…</MainMenu.Item>
             <MainMenu.Item onSelect={() => exportAs("svg")}>SVG image…</MainMenu.Item>
             <MainMenu.Item onSelect={() => exportAs("pdf")}>PDF (A4)…</MainMenu.Item>
+            {pages.length > 0 && (
+              <MainMenu.Item onSelect={() => exportAs("pdf-pages")}>
+                PDF, one page per frame ({pages.length})…
+              </MainMenu.Item>
+            )}
           </MainMenu.Group>
           <MainMenu.DefaultItems.SaveAsImage />
           <MainMenu.Separator />
@@ -546,6 +686,18 @@ export default function DrawingView({ name, content, darkMode, onChange, obsidia
           <MainMenu.DefaultItems.Help />
         </MainMenu>
       </Excalidraw>
+
+      {pagesOpen && !presenting && (
+        <PagesPanel
+          pages={pages}
+          active={activePage}
+          onGoto={gotoPage}
+          onRename={renamePage}
+          onMove={movePage}
+          onAdd={addPage}
+          onClose={togglePages}
+        />
+      )}
 
       {presenting && presentTool === "laser" && (
         <LaserOverlay onWheel={({ dx, dy, zoom, x, y }) => panZoom(dx, dy, zoom, x, y)} />
@@ -716,6 +868,104 @@ function PresentBar(p: PresentBarProps) {
       </button>
       <button className={btn()} onClick={p.onExit} title="Exit presentation (Esc)">
         <span className="text-xs px-1">Exit</span>
+      </button>
+    </div>
+  );
+}
+
+interface PagesPanelProps {
+  pages: any[];
+  active: number;
+  onGoto: (i: number) => void;
+  onRename: (frame: any, title: string) => void;
+  onMove: (i: number, dir: -1 | 1) => void;
+  onAdd: () => void;
+  onClose: () => void;
+}
+
+/** List of the drawing's pages (frames): jump, rename, reorder, add. */
+function PagesPanel({ pages, active, onGoto, onRename, onMove, onAdd, onClose }: PagesPanelProps) {
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  return (
+    <div className="absolute top-16 right-3 z-20 w-60 max-h-[calc(100%-9rem)] flex flex-col rounded-xl border border-gray-300 dark:border-gray-600 bg-white/95 dark:bg-[#232329]/95 shadow-lg text-sm text-gray-700 dark:text-gray-200">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-gray-700">
+        <span className="font-semibold text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Pages</span>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200" title="Hide pages">
+          ✕
+        </button>
+      </div>
+      <div className="flex-1 overflow-y-auto py-1">
+        {pages.length === 0 ? (
+          <p className="px-3 py-2 text-xs text-gray-500 dark:text-gray-400">
+            No pages yet. <b>Add page</b> puts what is on the canvas on page 1 and adds page 2. Each page is a
+            frame; you can also draw frames with the frame tool (F).
+          </p>
+        ) : (
+          pages.map((f, i) => (
+            <div
+              key={f.id}
+              className={`group flex items-center gap-2 px-3 py-1.5 cursor-pointer ${
+                i === active ? "bg-accent/15 text-accent" : "hover:bg-gray-100 dark:hover:bg-white/5"
+              }`}
+              onClick={() => onGoto(i)}
+              onDoubleClick={() => {
+                setEditing(f.id);
+                setDraft(pageTitle(f, i));
+              }}
+              title="Click to go there · double-click to rename"
+            >
+              <span className="w-5 text-right text-xs tabular-nums text-gray-400">{i + 1}</span>
+              {editing === f.id ? (
+                <input
+                  autoFocus
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => {
+                    e.stopPropagation();
+                    if (e.key === "Enter") {
+                      onRename(f, draft);
+                      setEditing(null);
+                    }
+                    if (e.key === "Escape") setEditing(null);
+                  }}
+                  onBlur={() => {
+                    onRename(f, draft);
+                    setEditing(null);
+                  }}
+                  className="flex-1 min-w-0 px-1 py-0 text-sm rounded border border-accent bg-white dark:bg-[#16162a] outline-none"
+                />
+              ) : (
+                <span className="flex-1 truncate">{pageTitle(f, i)}</span>
+              )}
+              <span className="hidden group-hover:flex gap-0.5 text-gray-400">
+                <button
+                  onClick={(e) => { e.stopPropagation(); onMove(i, -1); }}
+                  disabled={i === 0}
+                  className="px-1 hover:text-accent disabled:opacity-30"
+                  title="Move up"
+                >
+                  ↑
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); onMove(i, 1); }}
+                  disabled={i === pages.length - 1}
+                  className="px-1 hover:text-accent disabled:opacity-30"
+                  title="Move down"
+                >
+                  ↓
+                </button>
+              </span>
+            </div>
+          ))
+        )}
+      </div>
+      <button
+        onClick={onAdd}
+        className="m-2 px-3 py-1.5 text-xs rounded-lg border border-dashed border-gray-300 dark:border-gray-600 hover:border-accent hover:text-accent"
+      >
+        + Add page
       </button>
     </div>
   );

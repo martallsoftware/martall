@@ -1,16 +1,19 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import MermaidBlock from "./MermaidBlock";
+import type { EmbedSize } from "../utils/drawing";
 
 interface Props {
   path: string;
   title: string;
   dark: boolean;
   onOpen?: () => void;
+  /** From `![[Name|300]]` etc.: a compact diagram without the header bar. */
+  size?: EmbedSize | null;
 }
 
 /** A `.mmd` file shown inside a note for `![[Name]]`. */
-export default function MermaidEmbed({ path, title, dark, onOpen }: Props) {
+export default function MermaidEmbed({ path, title, dark, onOpen, size }: Props) {
   const [code, setCode] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -23,6 +26,19 @@ export default function MermaidEmbed({ path, title, dark, onOpen }: Props) {
       cancelled = true;
     };
   }, [path]);
+
+  if (size) {
+    return (
+      <span
+        className="martall-sized-embed inline-block my-2 align-top max-w-full cursor-pointer"
+        style={{ width: size.width, ["--embed-max-h" as string]: size.maxHeight ?? "none" }}
+        onDoubleClick={onOpen}
+        title={`${title} — double-click to open`}
+      >
+        {error ? <span className="text-xs text-red-400">{error}</span> : code !== null && <MermaidBlock chart={code} dark={dark} />}
+      </span>
+    );
+  }
 
   return (
     <div className="my-3 rounded-lg border border-gray-300/50 dark:border-gray-700/60 overflow-hidden">

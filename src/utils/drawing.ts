@@ -22,6 +22,21 @@ export function isDrawingPath(path: string | null | undefined): boolean {
   return !!path && (path.toLowerCase().endsWith(DRAWING_EXT) || isObsidianDrawingPath(path));
 }
 
+/** Size from an embed like `![[Name|300]]`, `|300x200` or `|50%` (Obsidian syntax). */
+export interface EmbedSize {
+  width?: string;
+  maxHeight?: string;
+}
+
+export function parseEmbedSize(text: string | null | undefined): EmbedSize | null {
+  const t = (text ?? "").trim();
+  let m = t.match(/^(\d{1,4})(?:\s*x\s*(\d{1,4}))?$/i);
+  if (m) return { width: `${m[1]}px`, maxHeight: m[2] ? `${m[2]}px` : undefined };
+  m = t.match(/^(\d{1,3})%$/);
+  if (m) return { width: `${Math.min(100, Number(m[1]))}%` };
+  return null;
+}
+
 /** File name of a drawing without folder and extension. */
 export function drawingName(path: string): string {
   return (path.split(/[/\\]/).pop() ?? path).replace(/\.excalidraw(\.md)?$/i, "");

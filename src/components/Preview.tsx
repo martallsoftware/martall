@@ -14,7 +14,8 @@ import TaskDialog from "./TaskDialog";
 import { applyTaskEdit, parseTaskLine, toggleTaskDone, type Task } from "../utils/task";
 import { todayIso } from "../utils/routine";
 import type { NoteInfo } from "../types";
-import { isDrawingPath, isMermaidPath } from "../utils/drawing";
+import { isDrawingPath, isMermaidPath, parseEmbedSize } from "../utils/drawing";
+import { splitPageRef } from "../utils/pages";
 
 // Excalidraw is large; only load it when a note embeds a drawing.
 const DrawingEmbed = lazy(() => import("./DrawingEmbed"));
@@ -82,7 +83,8 @@ function remarkWikiLinks() {
           out.push({
             type: "link",
             url: (embed ? "wikiembed:" : "wiki:") + target,
-            title: null,
+            // For embeds the part after "|" is a size (`|300`, `|300x200`, `|50%`).
+            title: embed && pipe >= 0 ? display : null,
             children: [{ type: "text", value: display }],
           });
           last = WIKI_LINK_RE.lastIndex;
@@ -132,7 +134,8 @@ function extractWikiTargets(md: string): string[] {
   while ((m = re.exec(stripped)) !== null) {
     const raw = m[1];
     const pipe = raw.indexOf("|");
-    const target = (pipe >= 0 ? raw.slice(0, pipe) : raw).trim();
+    // "Name#Page" / "Note#Heading": resolve the file name only.
+    const target = splitPageRef((pipe >= 0 ? raw.slice(0, pipe) : raw).trim())[0];
     if (target) set.add(target);
   }
   return Array.from(set);
@@ -700,16 +703,21 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
               }
               return <pre>{children}</pre>;
             },
-            a: ({ href, children }) => {
+            a: ({ href, children, title }) => {
               if (href && href.startsWith("wikiembed:")) {
                 const target = decodeTarget(href.slice(10));
-                const resolved = wikiResolved[target];
+                // `![[Drawing#Page]]` shows one page (frame) of a drawing.
+                const [base, page] = splitPageRef(target);
+                const resolved = wikiResolved[base];
+                const size = parseEmbedSize(title);
                 if (typeof resolved === "string" && isDrawingPath(resolved)) {
                   return (
                     <Suspense fallback={<span className="text-xs text-gray-400">Loading drawing…</span>}>
                       <DrawingEmbed
                         path={resolved}
-                        title={target}
+                        title={page ? `${base} › ${page}` : base}
+                        page={page || undefined}
+                        size={size}
                         dark={darkMode}
                         onOpen={onOpenNote ? () => onOpenNote(resolved) : undefined}
                       />
@@ -721,7 +729,8 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
                     <Suspense fallback={<span className="text-xs text-gray-400">Loading diagram…</span>}>
                       <MermaidEmbed
                         path={resolved}
-                        title={target}
+                        title={base}
+                        size={size}
                         dark={darkMode}
                         onOpen={onOpenNote ? () => onOpenNote(resolved) : undefined}
                       />
@@ -732,7 +741,7 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
               }
               if (href && href.startsWith("wiki:")) {
                 const target = decodeTarget(href.slice(5));
-                const resolved = wikiResolved[target];
+                const resolved = wikiResolved[splitPageRef(target)[0]];
                 const broken = resolved === null;
                 return (
                   <a
