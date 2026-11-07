@@ -8,6 +8,11 @@ export const DRAWING_EXT = ".excalidraw";
 /** Choice in the New Note template list that creates a drawing instead of a note. */
 export const DRAWING_TEMPLATE = "__excalidraw__";
 
+/** Mermaid diagram files (`.mmd`): code on the left, rendered diagram on the right. */
+export function isMermaidPath(path: string | null | undefined): boolean {
+  return !!path && path.toLowerCase().endsWith(".mmd");
+}
+
 export function isDrawingPath(path: string | null | undefined): boolean {
   return !!path && path.toLowerCase().endsWith(DRAWING_EXT);
 }

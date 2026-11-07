@@ -23,7 +23,7 @@ import QuickSwitcher from "./components/QuickSwitcher";
 import CalendarPanel from "./components/CalendarPanel";
 import TasksPanel from "./components/TasksPanel";
 import type { TreeNode } from "./types";
-import { DRAWING_TEMPLATE, drawingMeta, isDrawingPath, linkDrawingInNote, mermaidKey, mermaidToElements, sceneJson, withDrawingMeta } from "./utils/drawing";
+import { DRAWING_TEMPLATE, drawingMeta, isDrawingPath, isMermaidPath, linkDrawingInNote, mermaidKey, mermaidToElements, sceneJson, withDrawingMeta } from "./utils/drawing";
 import {
   addToUserLibrary,
   createDrawingUnique,
@@ -34,6 +34,7 @@ import {
   parseDrawingFile,
   parseLibraryFile,
 } from "./utils/drawingImport";
+import MermaidBlock from "./components/MermaidBlock";
 import CloseDrawingDialog, { type CloseDrawingChoice } from "./components/CloseDrawingDialog";
 
 // Excalidraw is large; load the drawing editor only when a drawing opens.
@@ -510,14 +511,18 @@ export default function App() {
       const current = noteRef.current;
       if (!current) return;
       const dir = current.path.replace(/[/\\][^/\\]*$/, "");
-      const title = current.path.split(/[/\\]/).pop()!.replace(/\.md$/i, "");
+      const title = current.path.split(/[/\\]/).pop()!.replace(/\.(md|mmd)$/i, "");
+      // Only a markdown note has a ```mermaid block the close prompt can replace.
+      const fromNote = !isMermaidPath(current.path);
       const key = mermaidKey(code);
 
+      // Compare ignoring "\\" vs "/" (Windows paths mix them).
+      const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
       const siblings = (function find(nodes: TreeNode[]): TreeNode[] | null {
-        if (dir === settingsRef.current.notes_directory.replace(/[/\\]+$/, "")) return nodes;
+        if (norm(dir) === norm(settingsRef.current.notes_directory)) return nodes;
         for (const n of nodes) {
           if (!n.is_folder) continue;
-          if (n.path === dir) return n.children;
+          if (norm(n.path) === norm(dir)) return n.children;
           const r = find(n.children);
           if (r) return r;
         }
@@ -528,7 +533,7 @@ export default function App() {
         try {
           const { content } = await invoke<{ content: string }>("read_note", { path: n.path });
           if (drawingMeta(content).mermaid === key) {
-            drawingOrigins.current.set(n.path, { notePath: current.path, code });
+            if (fromNote) drawingOrigins.current.set(n.path, { notePath: current.path, code });
             await handleSelectNote(n.path);
             return;
           }
@@ -543,7 +548,7 @@ export default function App() {
         { mermaid: key },
       );
       const drawingPath = await handleCreateDrawing(dir, `${title} diagram`, content);
-      drawingOrigins.current.set(drawingPath, { notePath: current.path, code });
+      if (fromNote) drawingOrigins.current.set(drawingPath, { notePath: current.path, code });
     },
     [handleCreateDrawing, handleSelectNote],
   );
@@ -935,7 +940,7 @@ ${previewEl.innerHTML}
             <button
               onClick={() => goBack()}
               className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 hover:text-accent transition-colors flex-shrink-0"
-              title={`Back to ${backStack[backStack.length - 1].split(/[\\/]/).pop()?.replace(/\.(md|excalidraw)$/, "")} (⌘[)`}
+              title={`Back to ${backStack[backStack.length - 1].split(/[\\/]/).pop()?.replace(/\.(md|excalidraw|mmd)$/, "")} (⌘[)`}
             >
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M10 3L5 8l5 5" />
@@ -955,7 +960,7 @@ ${previewEl.innerHTML}
                 rel = rel.slice(root.length).replace(/^[\\/]+/, "");
               }
               const parts = rel.split(/[\\/]/);
-              const filename = (parts.pop() || "").replace(/\.(md|excalidraw)$/, "");
+              const filename = (parts.pop() || "").replace(/\.(md|excalidraw|mmd)$/, "");
               return (
                 <div className="flex items-center gap-1 min-w-0 text-sm truncate">
                   {parts.map((folder, i) => (
@@ -1091,7 +1096,7 @@ ${previewEl.innerHTML}
           )}
 
           {/* Share menu */}
-          {note && activePanel !== "graph" && !isDrawingPath(note.path) && (
+          {note && activePanel !== "graph" && !isDrawingPath(note.path) && !isMermaidPath(note.path) && (
             <ShareMenu
               onPrint={handlePrint}
               onEmail={handleEmail}
@@ -1175,7 +1180,18 @@ ${previewEl.innerHTML}
                   className="h-full overflow-auto"
                   style={{ width: viewMode === "split" ? `${(1 - splitRatio) * 100}%` : "100%" }}
                 >
-                  <Preview content={note.content} notePath={note.path} darkMode={settings.dark_theme} onOpenNote={handleSelectNote} onContentChange={updateContent} onMermaidToDrawing={handleMermaidToDrawing} />
+                  {isMermaidPath(note.path) ? (
+                    // A .mmd file is all Mermaid: show it as one diagram.
+                    <div className="h-full overflow-auto p-5">
+                      <MermaidBlock
+                        chart={note.content}
+                        dark={settings.dark_theme}
+                        onEditAsDrawing={() => handleMermaidToDrawing(note.content)}
+                      />
+                    </div>
+                  ) : (
+                    <Preview content={note.content} notePath={note.path} darkMode={settings.dark_theme} onOpenNote={handleSelectNote} onContentChange={updateContent} onMermaidToDrawing={handleMermaidToDrawing} />
+                  )}
                 </div>
               )}
             </div>

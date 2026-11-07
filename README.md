@@ -180,6 +180,18 @@ Obsidian Excalidraw plugin use).
     the **Library** panel and are remembered. **Browse libraries** in the
     Library panel opens that site in your browser; click *Download* there and
     drop the file on the app.
+- **Present:** **▶ Present** (top right, or ☰) shows the drawing read-only
+  over the whole window, with a toolbar at the bottom:
+  - **Laser pointer** (L, on by default): a red dot follows the pointer;
+    hold the button to draw a glowing trail that fades after a second.
+  - **Hand** (H): drag to pan. Scroll pans and pinch / ⌘-scroll zooms in
+    both modes. Zoom − / Fit (F) / + buttons.
+  - **Slides:** Excalidraw *frames* (frame tool, F while editing) become
+    slides: ◀ ▶, the arrow keys, Space or PageUp/PageDown step through
+    them, Home/End jump. Order is a leading number in the frame name
+    ("1 Intro", "2 Flow"…), otherwise top-to-bottom, left-to-right. Frame
+    borders and titles are hidden while presenting.
+  - **Full screen** button (macOS full screen); **Exit** or Esc leaves.
 - **Export:** ☰ → *Export* saves the drawing to a file you choose:
   *Excalidraw file* (`.excalidraw`, opens on excalidraw.com and in other
   Excalidraw tools), *Obsidian note* (`.excalidraw.md` for the Obsidian
@@ -188,6 +200,19 @@ Obsidian Excalidraw plugin use).
   sharp at up to 3×; made in the app, nothing extra to install). Images
   use the canvas background and the current light/dark theme. *Export
   image…* below it copies a PNG to the clipboard.
+
+### Mermaid files (`.mmd`)
+- `.mmd` files in the vault show in the tree (⇄ icon) and open like notes:
+  Mermaid code on the left, the rendered diagram on the right. They are
+  searchable (colour codes are not turned into tags), and the preview has
+  **✏️ Edit as drawing**.
+- **Templates:** New Note → *Template* has a **Mermaid (.mmd)** group:
+  *Flowchart*, *Sequence*, *Architecture* (subgraphs + the four diagram
+  colours: ready / todo / ext / info, numbered green data-flow links),
+  *State* and *ER diagram*. They live in `Templates/` as `.mmd` files; add
+  your own `.mmd` files there and they appear in the list. `{{title}}`,
+  `{{date}}` and `{{ask:…}}` work as in other templates.
+- `![[Name]]` in a note shows the `.mmd` diagram inline.
 
 ### Tree: note types and pinning
 - **Icons by note type:** drawing (✏️ green), daily note (calendar, in

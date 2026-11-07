@@ -15,6 +15,8 @@ import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import LaserOverlay from "./LaserOverlay";
 import "@excalidraw/excalidraw/index.css";
 import { drawingMeta, parseScene, withDrawingMeta } from "../utils/drawing";
 import { bytesToBase64, canvasToPdf } from "../utils/pdf";
@@ -78,6 +80,26 @@ function blobToBase64(blob: Blob): Promise<string> {
     r.onerror = () => reject(r.error);
     r.readAsDataURL(blob);
   });
+}
+
+/** Make Excalidraw pick up a new container size (it listens for window resizes). */
+function remeasure(api: ExcalidrawImperativeAPI) {
+  window.dispatchEvent(new Event("resize"));
+  api.refresh();
+}
+
+/**
+ * Frames in slide order: by a leading number in their name when every frame
+ * has one ("1 Intro", "2 Flow"…), otherwise reading order (rows, then left→right).
+ */
+function slideFrames(elements: readonly any[]): any[] {
+  const frames = elements.filter((e) => (e.type === "frame" || e.type === "magicframe") && !e.isDeleted);
+  const num = (f: any) => parseFloat(String(f.name ?? "").match(/^\s*(\d+(?:\.\d+)?)/)?.[1] ?? "NaN");
+  if (frames.length > 1 && frames.every((f) => !Number.isNaN(num(f)))) {
+    return frames.sort((a, b) => num(a) - num(b));
+  }
+  const rowHeight = Math.max(100, Math.min(...frames.map((f) => f.height)) / 2);
+  return frames.sort((a, b) => Math.round(a.y / rowHeight) - Math.round(b.y / rowHeight) || a.x - b.x);
 }
 
 interface Props {
@@ -154,6 +176,137 @@ export default function DrawingView({ name, content, darkMode, onChange }: Props
     });
     api.scrollToContent(shifted, { fitToContent: true, animate: true });
   }, []);
+
+  // --- Present mode: read-only, full window, laser pointer, frames as slides ---
+  const [presenting, setPresenting] = useState(false);
+  const [presentTool, setPresentTool] = useState<"laser" | "hand">("laser");
+  const [slides, setSlides] = useState<any[]>([]);
+  const [slide, setSlide] = useState(0);
+  const [fullscreen, setFullscreen] = useState(false);
+  const savedFrameRendering = useRef<any>(null);
+
+  const showSlide = useCallback((frames: any[], i: number) => {
+    const api = apiRef.current;
+    if (!api) return;
+    // fitToViewport (unlike fitToContent) also zooms in past 100%, so a slide fills the screen.
+    const fit = { fitToViewport: true, viewportZoomFactor: 0.92, animate: true, duration: 350 } as const;
+    if (frames.length === 0) {
+      api.scrollToContent(undefined, fit);
+      return;
+    }
+    const idx = Math.max(0, Math.min(frames.length - 1, i));
+    setSlide(idx);
+    api.scrollToContent(frames[idx], fit);
+  }, []);
+
+  // Laser is our own overlay (Excalidraw pans on drag in view mode, even with
+  // its laser tool); hand leaves the pointer to Excalidraw, which pans.
+  const choosePresentTool = useCallback((tool: "laser" | "hand") => {
+    setPresentTool(tool);
+  }, []);
+
+  /** Pan by screen pixels, or zoom by `factor` keeping screen point (x, y) still. */
+  const panZoom = useCallback((dx: number, dy: number, factor: number | null, x?: number, y?: number) => {
+    const api = apiRef.current;
+    if (!api) return;
+    const st = api.getAppState();
+    const z = st.zoom.value;
+    if (factor === null) {
+      api.updateScene({ appState: { scrollX: st.scrollX - dx / z, scrollY: st.scrollY - dy / z } });
+      return;
+    }
+    const z2 = Math.max(0.1, Math.min(30, z * factor));
+    const px = (x ?? st.offsetLeft + st.width / 2) - st.offsetLeft;
+    const py = (y ?? st.offsetTop + st.height / 2) - st.offsetTop;
+    api.updateScene({
+      appState: {
+        zoom: { value: z2 as any },
+        scrollX: st.scrollX + px * (1 / z2 - 1 / z),
+        scrollY: st.scrollY + py * (1 / z2 - 1 / z),
+      },
+    });
+  }, []);
+
+  const toggleFullscreen = useCallback(async () => {
+    try {
+      const win = getCurrentWindow();
+      const next = !(await win.isFullscreen());
+      await win.setFullscreen(next);
+      setFullscreen(next);
+      setTimeout(() => apiRef.current && remeasure(apiRef.current), 300);
+    } catch (err) {
+      setNotice(`Full screen is not available: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, []);
+
+  const startPresenting = useCallback(() => {
+    const api = apiRef.current;
+    if (!api) return;
+    const frames = slideFrames(api.getSceneElements());
+    setSlides(frames);
+    // Frames act as slides: clip to them and hide their outlines and titles.
+    savedFrameRendering.current = api.getAppState().frameRendering;
+    api.updateScene({ appState: { frameRendering: { enabled: true, clip: true, name: false, outline: false } } });
+    setPresenting(true);
+    setNotice(
+      (frames.length ? `${frames.length} slides (frames) · ← → or Space to step\n` : "") +
+        "L laser · H hand · F fit · Esc exit",
+    );
+    // Let view mode and the full-window layout apply (Excalidraw re-measures
+    // its size on refresh), then choose the tool and frame the view.
+    setTimeout(() => {
+      remeasure(api);
+      // The new size lands in state on the next render; frame after that.
+      setTimeout(() => {
+        choosePresentTool("laser");
+        showSlide(frames, 0);
+      }, 80);
+    }, 60);
+  }, [choosePresentTool, showSlide]);
+
+  const stopPresenting = useCallback(async () => {
+    const api = apiRef.current;
+    setPresenting(false);
+    if (api) {
+      if (savedFrameRendering.current) api.updateScene({ appState: { frameRendering: savedFrameRendering.current } });
+      setTimeout(() => {
+        remeasure(api);
+        api.setActiveTool({ type: "selection" });
+      }, 60);
+    }
+    if (fullscreen) {
+      await getCurrentWindow().setFullscreen(false).catch(() => {});
+      setFullscreen(false);
+    }
+  }, [fullscreen]);
+
+  useEffect(() => {
+    if (!presenting) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const handled = (() => {
+        switch (e.key) {
+          case "ArrowRight": case "ArrowDown": case "PageDown": case " ":
+            showSlide(slides, slide + 1); return true;
+          case "ArrowLeft": case "ArrowUp": case "PageUp":
+            showSlide(slides, slide - 1); return true;
+          case "Home": showSlide(slides, 0); return true;
+          case "End": showSlide(slides, slides.length - 1); return true;
+          case "l": case "L": case "k": case "K": choosePresentTool("laser"); return true;
+          case "h": case "H": choosePresentTool("hand"); return true;
+          case "f": case "F": showSlide(slides, slide); return true;
+          case "Escape": stopPresenting(); return true;
+        }
+        return false;
+      })();
+      if (handled) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [presenting, slides, slide, showSlide, choosePresentTool, stopPresenting]);
 
   const insertMermaid = useCallback(
     async (code: string) => {
@@ -303,8 +456,16 @@ export default function DrawingView({ name, content, darkMode, onChange }: Props
   }, [insertScene]);
 
   return (
-    <div className="h-full w-full martall-drawing">
+    <div
+      className={
+        presenting
+          ? "fixed inset-0 z-[60] martall-drawing martall-presenting bg-white dark:bg-[#121212]"
+          : "h-full w-full martall-drawing"
+      }
+    >
       <Excalidraw
+        viewModeEnabled={presenting}
+        zenModeEnabled={presenting}
         excalidrawAPI={(api) => {
           if (apiRef.current) return;
           apiRef.current = api;
@@ -320,19 +481,38 @@ export default function DrawingView({ name, content, darkMode, onChange }: Props
         UIOptions={{
           canvasActions: { loadScene: false, saveToActiveFile: false, toggleTheme: false, export: false },
         }}
-        renderTopRightUI={() => (
-          <button
-            onClick={() => setMermaidOpen(true)}
-            className="px-3 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-[#232329] text-gray-700 dark:text-gray-200 hover:border-accent hover:text-accent transition-colors"
-            title="Convert Mermaid code into editable shapes"
-          >
-            Import Mermaid
-          </button>
-        )}
+        renderTopRightUI={() =>
+          presenting ? null : (
+            <div className="flex gap-2">
+              <button
+                onClick={() => setMermaidOpen(true)}
+                className="whitespace-nowrap px-3 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-[#232329] text-gray-700 dark:text-gray-200 hover:border-accent hover:text-accent transition-colors"
+                title="Convert Mermaid code into editable shapes"
+              >
+                Import Mermaid
+              </button>
+              <button
+                onClick={startPresenting}
+                className="whitespace-nowrap px-3 py-1.5 text-xs rounded-lg bg-accent text-white hover:bg-accent/90 transition-colors"
+                title="Read-only presentation with laser pointer; frames become slides"
+              >
+                ▶ Present
+              </button>
+            </div>
+          )
+        }
       >
         <MainMenu>
-          <MainMenu.Item onSelect={() => setMermaidOpen(true)}>Import Mermaid…</MainMenu.Item>
-          <MainMenu.Item onSelect={importFile}>Import file… (drawing or library)</MainMenu.Item>
+          {/* While presenting the drawing is read-only: no imports or clearing. */}
+          {presenting ? (
+            <MainMenu.Item onSelect={stopPresenting}>Exit presentation (Esc)</MainMenu.Item>
+          ) : (
+            <>
+              <MainMenu.Item onSelect={() => setMermaidOpen(true)}>Import Mermaid…</MainMenu.Item>
+              <MainMenu.Item onSelect={importFile}>Import file… (drawing or library)</MainMenu.Item>
+              <MainMenu.Item onSelect={startPresenting}>▶ Present</MainMenu.Item>
+            </>
+          )}
           <MainMenu.Separator />
           <MainMenu.Group title="Export">
             <MainMenu.Item onSelect={() => exportAs("excalidraw")}>Excalidraw file (.excalidraw)…</MainMenu.Item>
@@ -344,12 +524,32 @@ export default function DrawingView({ name, content, darkMode, onChange }: Props
           <MainMenu.DefaultItems.SaveAsImage />
           <MainMenu.Separator />
           <MainMenu.DefaultItems.SearchMenu />
-          <MainMenu.DefaultItems.ClearCanvas />
+          {!presenting && <MainMenu.DefaultItems.ClearCanvas />}
           <MainMenu.Separator />
           <MainMenu.DefaultItems.ChangeCanvasBackground />
           <MainMenu.DefaultItems.Help />
         </MainMenu>
       </Excalidraw>
+
+      {presenting && presentTool === "laser" && (
+        <LaserOverlay onWheel={({ dx, dy, zoom, x, y }) => panZoom(dx, dy, zoom, x, y)} />
+      )}
+
+      {presenting && (
+        <PresentBar
+          tool={presentTool}
+          onTool={choosePresentTool}
+          slide={slide}
+          slideCount={slides.length}
+          onPrev={() => showSlide(slides, slide - 1)}
+          onNext={() => showSlide(slides, slide + 1)}
+          onFit={() => showSlide(slides, slide)}
+          onZoom={(factor) => panZoom(0, 0, factor)}
+          fullscreen={fullscreen}
+          onFullscreen={toggleFullscreen}
+          onExit={stopPresenting}
+        />
+      )}
 
       {notice && (
         <div className="fixed bottom-16 left-1/2 -translate-x-1/2 z-50 max-w-lg whitespace-pre-line rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-[#232329] px-4 py-2 text-xs text-gray-700 dark:text-gray-200 shadow-lg">
@@ -435,6 +635,72 @@ function MermaidImportDialog({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+interface PresentBarProps {
+  tool: "laser" | "hand";
+  onTool: (tool: "laser" | "hand") => void;
+  slide: number;
+  slideCount: number;
+  onPrev: () => void;
+  onNext: () => void;
+  onFit: () => void;
+  onZoom: (factor: number) => void;
+  fullscreen: boolean;
+  onFullscreen: () => void;
+  onExit: () => void;
+}
+
+/** Floating toolbar shown while presenting a drawing. */
+function PresentBar(p: PresentBarProps) {
+  const btn = (active = false) =>
+    `h-9 min-w-9 px-2 flex items-center justify-center rounded-lg text-sm transition-colors ${
+      active ? "bg-accent text-white" : "text-gray-700 dark:text-gray-200 hover:bg-gray-200/70 dark:hover:bg-white/10"
+    }`;
+  const sep = <div className="w-px h-6 bg-gray-300 dark:bg-gray-600 mx-1" />;
+  return (
+    <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[70] flex items-center gap-1 px-2 py-1.5 rounded-xl border border-gray-300 dark:border-gray-600 bg-white/95 dark:bg-[#232329]/95 shadow-xl">
+      <button className={btn(p.tool === "laser")} onClick={() => p.onTool("laser")} title="Laser pointer (L)">
+        <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+          <circle cx="14.5" cy="5.5" r="2.5" fill="currentColor" stroke="none" />
+          <path d="M3 17l8.5-8.5" />
+          <path d="M13 1.5v1M18.5 5.5h-1M17.5 2.5l-.7.7" />
+        </svg>
+      </button>
+      <button className={btn(p.tool === "hand")} onClick={() => p.onTool("hand")} title="Hand: drag to pan (H)">
+        <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M7 10V4.5a1.25 1.25 0 0 1 2.5 0V9M9.5 8.5V3.25a1.25 1.25 0 0 1 2.5 0V9M12 8.5V4.5a1.25 1.25 0 0 1 2.5 0v6.5a6 6 0 0 1-6 6h-.5a5 5 0 0 1-4-2l-2.2-3.1a1.3 1.3 0 0 1 2-1.6L7 13" />
+        </svg>
+      </button>
+      {sep}
+      {p.slideCount > 0 && (
+        <>
+          <button className={btn()} onClick={p.onPrev} disabled={p.slide === 0} title="Previous slide (←)">◀</button>
+          <span className="text-xs tabular-nums text-gray-500 dark:text-gray-400 px-1 select-none">
+            {p.slide + 1} / {p.slideCount}
+          </span>
+          <button className={btn()} onClick={p.onNext} disabled={p.slide >= p.slideCount - 1} title="Next slide (→ or Space)">▶</button>
+          {sep}
+        </>
+      )}
+      <button className={btn()} onClick={() => p.onZoom(1 / 1.2)} title="Zoom out">−</button>
+      <button className={btn()} onClick={p.onFit} title={p.slideCount ? "Fit slide (F)" : "Fit drawing (F)"}>
+        <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4" /></svg>
+      </button>
+      <button className={btn()} onClick={() => p.onZoom(1.2)} title="Zoom in">+</button>
+      {sep}
+      <button className={btn(p.fullscreen)} onClick={p.onFullscreen} title="Full screen">
+        <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+          <rect x="2.5" y="3.5" width="15" height="10" rx="1.5" />
+          <path d="M7 17h6M10 13.5V17" />
+          {p.fullscreen && <path d="M8 7l4 3M12 7l-4 3" />}
+        </svg>
+      </button>
+      <button className={btn()} onClick={p.onExit} title="Exit presentation (Esc)">
+        <span className="text-xs px-1">Exit</span>
+      </button>
     </div>
   );
 }

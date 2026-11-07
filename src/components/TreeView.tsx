@@ -83,6 +83,11 @@ const KIND_ICONS: Record<string, { title: string; cls: string; paths: React.Reac
     cls: "text-teal-400",
     paths: <><rect x="1.5" y="2" width="5" height="3.5" rx="0.5" /><rect x="9.5" y="10.5" width="5" height="3.5" rx="0.5" /><path d="M4 5.5v4.5a2 2 0 0 0 2 2h3.5" /></>,
   },
+  mermaid: {
+    title: "Mermaid diagram (.mmd)",
+    cls: "text-cyan-400",
+    paths: <><rect x="1.5" y="1.5" width="5" height="4" rx="1" /><rect x="9.5" y="1.5" width="5" height="4" rx="1" /><path d="M8 14.5l-2.5-3h5z" /><path d="M4 5.5v2.5h8V5.5M8 8v3.5" /></>,
+  },
   drawing: {
     title: "Excalidraw drawing",
     cls: "text-accent",
@@ -99,6 +104,24 @@ function NoteIcon({ node }: { node: TreeNode }) {
       {icon.paths}
     </svg>
   );
+}
+
+/** Compare paths ignoring "\\" vs "/" and a trailing slash. */
+function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  return norm(a) === norm(b);
+}
+
+/** Nodes from the top level down to the node at `path`, or null if not in the tree. */
+function pathChain(nodes: TreeNode[], path: string): TreeNode[] | null {
+  for (const n of nodes) {
+    if (samePath(n.path, path)) return [n];
+    if (n.is_folder) {
+      const rest = pathChain(n.children, path);
+      if (rest) return [n, ...rest];
+    }
+  }
+  return null;
 }
 
 /** The list a node sits in (its parent's children, or the top level). */
@@ -312,24 +335,20 @@ export default function TreeView({
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Reveal: open every folder from the vault root down to the target.
+  // Paths are matched slash-insensitively and the tree's own paths are used,
+  // because on Windows tree paths use "\" while callers may build them with "/".
   useEffect(() => {
     if (!reveal || reveal.key === lastRevealKey) return;
     lastRevealKey = reveal.key;
-    const { path } = reveal;
-    const rel = path.startsWith(rootDir) ? path.slice(rootDir.length).replace(/^[\\/]+/, "") : "";
-    const parts = rel.split(/[\\/]/).filter(Boolean);
-    const isFolder = !/\.(md|excalidraw)$/i.test(path);
-    const folders: string[] = [];
-    let acc = rootDir.replace(/[\\/]+$/, "");
-    (isFolder ? parts : parts.slice(0, -1)).forEach((p) => {
-      acc = `${acc}/${p}`;
-      folders.push(acc);
-    });
+    const chain = pathChain(nodes, reveal.path);
+    if (!chain) return;
+    const target = chain[chain.length - 1];
+    const folders = chain.filter((n) => n.is_folder).map((n) => n.path);
     setExpandedPaths((prev) => new Set([...prev, ...folders]));
-    setHighlightPath(path);
+    setHighlightPath(target.path);
     // Scroll once the expanded folders have rendered.
     const scroll = setTimeout(() => {
-      const el = containerRef.current?.querySelector(`[data-tree-path="${CSS.escape(path)}"]`);
+      const el = containerRef.current?.querySelector(`[data-tree-path="${CSS.escape(target.path)}"]`);
       el?.scrollIntoView({ block: "center", behavior: "smooth" });
     }, 60);
     const t = setTimeout(() => setHighlightPath(null), 2000);
