@@ -88,13 +88,40 @@ export function parseDrawingFile(path: string, text: string): ImportedScene {
  * Scene JSON as an Obsidian Excalidraw note (`.excalidraw.md`): text elements
  * listed for Obsidian search/links, the scene as compressed JSON.
  */
-export function toObsidianMarkdown(sceneJson: string): string {
+function obsidianTextElements(sceneJson: string): string {
   const doc = JSON.parse(sceneJson);
-  const texts = (doc.elements ?? [])
+  return (doc.elements ?? [])
     .filter((e: any) => e.type === "text" && !e.isDeleted && String(e.text ?? "").trim())
-    .map((e: any) => `${String(e.text).replace(/\n/g, " ")} ^${e.id}`)
+    // originalText is the text as typed; `text` has the automatic line wraps.
+    .map((e: any) => `${String(e.originalText ?? e.text).replace(/\n/g, " ")} ^${e.id}`)
     .join("\n\n");
-  const compressed = (compressToBase64(sceneJson).match(/.{1,256}/g) ?? []).join("\n\n");
+}
+
+function obsidianCompressed(sceneJson: string): string {
+  return (compressToBase64(sceneJson).match(/.{1,256}/g) ?? []).join("\n\n");
+}
+
+/**
+ * Save a scene back into an existing Obsidian drawing note: only the drawing
+ * block and the "Text Elements" list change; front matter, tags, notes and
+ * the "Embedded Files" section stay as they were. Falls back to a fresh note
+ * if the file has no drawing block.
+ */
+export function updateObsidianMarkdown(original: string, sceneJson: string): string {
+  const block = /(#+\s*Drawing\s*\n```)(compressed-json|json)[ \t]*\n[\s\S]*?\n?```/;
+  const m = original.match(block);
+  if (!m) return toObsidianMarkdown(sceneJson);
+  // Keep the format the file already uses (plugin setting: compressed or not).
+  const data = m[2] === "json" ? JSON.stringify(JSON.parse(sceneJson), null, "\t") : obsidianCompressed(sceneJson);
+  let out = original.replace(block, (_all, head: string, kind: string) => `${head}${kind}\n${data}\n\`\`\``);
+  const texts = obsidianTextElements(sceneJson);
+  out = out.replace(/(#+\s*Text Elements[ \t]*\n)([\s\S]*?)(?=\n#+\s|\n%%|$)/, (_all, head: string) => `${head}${texts}\n`);
+  return out;
+}
+
+export function toObsidianMarkdown(sceneJson: string): string {
+  const texts = obsidianTextElements(sceneJson);
+  const compressed = obsidianCompressed(sceneJson);
   return [
     "---",
     "",

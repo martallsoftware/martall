@@ -203,6 +203,11 @@ fn migrate(conn: &Connection) {
         let _ = conn.execute("UPDATE notes SET modified_at = 0", []);
         let _ = conn.execute_batch("PRAGMA user_version = 1");
     }
+    // v2: Obsidian drawings (.excalidraw.md) get their own title and index text.
+    if version < 2 {
+        let _ = conn.execute("UPDATE notes SET modified_at = 0 WHERE LOWER(rel_path) LIKE '%.excalidraw.md'", []);
+        let _ = conn.execute_batch("PRAGMA user_version = 2");
+    }
 
     // Same idea for task due dates (`📅` marker on checkbox lines).
     let tasks_count: i64 = conn
@@ -359,6 +364,66 @@ fn rel_path(file_path: &Path, notes_dir: &Path) -> Option<String> {
 pub const DRAWING_EXT: &str = "excalidraw";
 
 /// Notes (`.md`) and drawings (`.excalidraw`) are both indexed.
+/// Obsidian Excalidraw plugin drawings: a markdown file holding the scene.
+pub const OBSIDIAN_DRAWING_SUFFIX: &str = ".excalidraw.md";
+
+pub fn is_obsidian_drawing(path: &Path) -> bool {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_lowercase().ends_with(OBSIDIAN_DRAWING_SUFFIX))
+        .unwrap_or(false)
+}
+
+/// Title of a note or drawing: the file name without its extension
+/// (`X.excalidraw.md` → `X`, so `[[X]]` and `[[X.excalidraw]]` find it).
+pub fn note_title(path: &Path) -> String {
+    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    if name.to_lowercase().ends_with(OBSIDIAN_DRAWING_SUFFIX) {
+        return name[..name.len() - OBSIDIAN_DRAWING_SUFFIX.len()].to_string();
+    }
+    path.file_stem().unwrap_or_default().to_string_lossy().to_string()
+}
+
+/// Searchable text of an Obsidian drawing: any markdown written before the
+/// drawing data, plus the "Text Elements" list (block ids removed). The
+/// compressed scene itself is left out.
+fn obsidian_index_text(content: &str) -> String {
+    let mut body = content;
+    if let Some(rest) = body.strip_prefix("---") {
+        if let Some(end) = rest.find("\n---") {
+            body = &rest[end + 4..];
+        }
+    }
+    let data_at = body.find("# Excalidraw Data").or_else(|| body.find("# Text Elements")).unwrap_or(body.len());
+    let before = body[..data_at]
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("==⚠"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut out: Vec<String> = Vec::new();
+    if !before.trim().is_empty() {
+        out.push(before.trim().to_string());
+    }
+    if let Some(t) = body.find("# Text Elements") {
+        let section = &body[t..];
+        for line in section.lines().skip(1) {
+            let l = line.trim();
+            if l.starts_with('#') || l.starts_with("%%") {
+                break;
+            }
+            if l.is_empty() {
+                continue;
+            }
+            // "Label text ^AbC123xy" → "Label text"
+            let text = match l.rfind(" ^") {
+                Some(i) if !l[i + 2..].contains(' ') => &l[..i],
+                _ => l,
+            };
+            out.push(text.to_string());
+        }
+    }
+    out.join("\n").trim().to_string()
+}
+
 /// File extension of Mermaid diagram files.
 pub const MERMAID_EXT: &str = "mmd";
 
@@ -370,6 +435,9 @@ pub fn is_indexable(path: &Path) -> bool {
 /// live elements (one per line), so drawings are searchable and linkable
 /// without indexing colours like `#dcfce7` as tags.
 pub fn index_text(path: &Path, content: &str) -> String {
+    if is_obsidian_drawing(path) {
+        return obsidian_index_text(content);
+    }
     if path.extension().is_some_and(|ext| ext == MERMAID_EXT) {
         // Searchable as text, but `fill:#dcfce7` must not become a #tag.
         static HEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
@@ -387,7 +455,8 @@ pub fn index_text(path: &Path, content: &str) -> String {
         .map(|els| {
             els.iter()
                 .filter(|el| !el.get("isDeleted").and_then(|d| d.as_bool()).unwrap_or(false))
-                .filter_map(|el| el.get("text").and_then(|t| t.as_str()))
+                // originalText is the text as typed; "text" includes automatic wraps.
+                .filter_map(|el| el.get("originalText").or_else(|| el.get("text")).and_then(|t| t.as_str()))
                 .filter(|t| !t.trim().is_empty())
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -399,7 +468,8 @@ pub fn index_text(path: &Path, content: &str) -> String {
 /// folder (Templates/, Daily/), then content markers.
 pub fn note_kind(rel_path: &str, content: &str) -> &'static str {
     let rp = rel_path.replace('\\', "/");
-    if rp.to_lowercase().ends_with(&format!(".{}", DRAWING_EXT)) {
+    let lower = rp.to_lowercase();
+    if lower.ends_with(&format!(".{}", DRAWING_EXT)) || lower.ends_with(OBSIDIAN_DRAWING_SUFFIX) {
         return "drawing";
     }
     if rp.to_lowercase().ends_with(&format!(".{}", MERMAID_EXT)) {
@@ -498,11 +568,7 @@ pub fn sync_index(conn: &Connection, notes_dir: &str) {
             }
 
             if let Ok(content) = fs::read_to_string(path) {
-                let title = path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
+                let title = note_title(path);
                 upsert_note(conn, &rp, &title, &index_text(path, &content), mtime);
             }
         }
@@ -1130,7 +1196,10 @@ fn resolve_target(
         .query_map(params![target], |row| row.get::<_, String>(0))
         .ok()?
         .filter_map(|r| r.ok())
-        .filter(|rp: &String| !drawing_only || rp.to_lowercase().ends_with(&drawing_suffix))
+        .filter(|rp: &String| {
+            let rp = rp.to_lowercase();
+            !drawing_only || rp.ends_with(&drawing_suffix) || rp.ends_with(OBSIDIAN_DRAWING_SUFFIX)
+        })
         .collect();
 
     if matches.is_empty() {
@@ -1185,10 +1254,7 @@ pub fn get_backlinks(conn: &Connection, notes_dir: &str, note_path: &str) -> Vec
         Ok(p) => p.to_string_lossy().to_string(),
         Err(_) => return Vec::new(),
     };
-    let title = Path::new(&rp)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
+    let title = note_title(Path::new(&rp));
     let rp_without_ext = rp.trim_end_matches(".md").to_string();
 
     let mut stmt = match conn.prepare(
@@ -1262,6 +1328,22 @@ mod kind_tests {
         assert_eq!(note_kind("T.md", "text\n  - [x] done\n"), "tasks");
         assert_eq!(note_kind("M.md", "```mermaid\nflowchart LR\n```"), "diagram");
         assert_eq!(note_kind("N.md", "plain #routines text"), "note");
+    }
+}
+
+#[cfg(test)]
+mod obsidian_tests {
+    use super::*;
+
+    #[test]
+    fn obsidian_drawing_title_kind_and_text() {
+        let p = Path::new("Zoo/Drawing 2026-02-11 18.05.58.excalidraw.md");
+        assert_eq!(note_title(p), "Drawing 2026-02-11 18.05.58");
+        assert_eq!(note_title(Path::new("a/Plan.md")), "Plan");
+        assert_eq!(note_kind("Zoo/Drawing 2026-02-11 18.05.58.excalidraw.md", ""), "drawing");
+        let md = "---\nexcalidraw-plugin: parsed\ntags: [excalidraw]\n---\n==⚠  Switch to EXCALIDRAW VIEW ⚠==\n\nSee #zoo\n\n# Excalidraw Data\n\n## Text Elements\nGiraffe ^aB3dE9fG\n\nBelongs to ^Zx81kLmn\n\n## Embedded Files\nabc: [[pic.png]]\n\n%%\n## Drawing\n```compressed-json\nN4KAkARALgngDgUwgLgAQQQDwMYEMA2AlgCYBOuA7gPaEC2AJaJSg\n```\n%%";
+        let t = index_text(p, md);
+        assert_eq!(t, "See #zoo\nGiraffe\nBelongs to");
     }
 }
 

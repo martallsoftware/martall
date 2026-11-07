@@ -13,8 +13,18 @@ export function isMermaidPath(path: string | null | undefined): boolean {
   return !!path && path.toLowerCase().endsWith(".mmd");
 }
 
+/** Obsidian Excalidraw plugin drawing: markdown holding the scene. */
+export function isObsidianDrawingPath(path: string | null | undefined): boolean {
+  return !!path && path.toLowerCase().endsWith(".excalidraw.md");
+}
+
 export function isDrawingPath(path: string | null | undefined): boolean {
-  return !!path && path.toLowerCase().endsWith(DRAWING_EXT);
+  return !!path && (path.toLowerCase().endsWith(DRAWING_EXT) || isObsidianDrawingPath(path));
+}
+
+/** File name of a drawing without folder and extension. */
+export function drawingName(path: string): string {
+  return (path.split(/[/\\]/).pop() ?? path).replace(/\.excalidraw(\.md)?$/i, "");
 }
 
 /** Scene JSON for a new drawing, optionally starting from `elements`. */

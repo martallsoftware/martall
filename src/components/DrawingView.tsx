@@ -31,6 +31,7 @@ import {
   parseLibraryFile,
   saveUserLibrary,
   toObsidianMarkdown,
+  updateObsidianMarkdown,
 } from "../utils/drawingImport";
 
 // Fonts are bundled in public/excalidraw-assets so drawing works offline.
@@ -108,9 +109,13 @@ interface Props {
   content: string;
   darkMode: boolean;
   onChange: (content: string) => void;
+  /** The file is an Obsidian drawing (`.excalidraw.md`): read and save in that format. */
+  obsidian?: boolean;
 }
 
-export default function DrawingView({ name, content, darkMode, onChange }: Props) {
+export default function DrawingView({ name, content, darkMode, onChange, obsidian = false }: Props) {
+  // Latest file text, so an Obsidian drawing is saved by patching it in place.
+  const fileText = useRef(content);
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
   const [mermaidOpen, setMermaidOpen] = useState(false);
 
@@ -119,7 +124,15 @@ export default function DrawingView({ name, content, darkMode, onChange }: Props
   const meta = useMemo(() => drawingMeta(content), []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const initialData = useMemo(() => {
-    const scene = parseScene(content);
+    let scene = parseScene(content);
+    if (obsidian) {
+      try {
+        const s = parseDrawingFile("drawing.excalidraw.md", content);
+        scene = { elements: s.elements, appState: JSON.parse(s.json).appState, files: s.files };
+      } catch (err) {
+        console.error("Could not read Obsidian drawing:", err);
+      }
+    }
     const own = loadUserLibrary();
     const ownIds = new Set(own.map((i) => i.id));
     return {
@@ -143,9 +156,12 @@ export default function DrawingView({ name, content, darkMode, onChange }: Props
       }
       if (key === lastKey.current) return;
       lastKey.current = key;
-      onChange(withDrawingMeta(serializeAsJSON(elements, appState, files, "local"), meta));
+      const json = serializeAsJSON(elements, appState, files, "local");
+      const next = obsidian ? updateObsidianMarkdown(fileText.current, json) : withDrawingMeta(json, meta);
+      fileText.current = next;
+      onChange(next);
     },
-    [onChange, meta],
+    [onChange, meta, obsidian],
   );
 
   const [notice, setNotice] = useState<string | null>(null);

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import EmojiPicker from "./EmojiPicker";
 import TableDialog from "./TableDialog";
 import FlowchartDialog from "./FlowchartDialog";
+import DrawingPicker from "./DrawingPicker";
 import TaskDialog from "./TaskDialog";
 import { applyTaskEdit, taskForLine, type Task } from "../utils/task";
 import { todayIso } from "../utils/routine";
@@ -89,6 +90,7 @@ function EditorImpl({ content, onChange, notePath }: Props, ref: React.Ref<Edito
   const [showEmoji, setShowEmoji] = useState(false);
   const [showTable, setShowTable] = useState(false);
   const [showFlowchart, setShowFlowchart] = useState(false);
+  const [showDrawing, setShowDrawing] = useState(false);
   const [taskEdit, setTaskEdit] = useState<{ line: number; task: Task; isNew: boolean } | null>(null);
 
   /** Open the task dialog for the line under the caret (Cmd/Ctrl+Shift+T). */
@@ -361,6 +363,29 @@ function EditorImpl({ content, onChange, notePath }: Props, ref: React.Ref<Edito
             <path d="M3 12h4M11 6h4" />
           </svg>
         </button>
+
+        {/* Insert drawing button */}
+        <div className="relative">
+          <button
+            onClick={() => { setShowDrawing(!showDrawing); setShowFlowchart(false); setShowTable(false); setShowEmoji(false); }}
+            className={`p-1.5 rounded-lg transition-colors ${
+              showDrawing
+                ? "bg-accent/15 text-accent"
+                : "text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
+            }`}
+            title="Insert drawing (Excalidraw)"
+          >
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="1.5" y="2.5" width="6" height="4.5" rx="0.8" />
+              <circle cx="13" cy="12.5" r="3" />
+              <path d="M7.5 4.75h3.5a2 2 0 0 1 2 2V9.5" />
+              <path d="M2 16l3.5-3.5" />
+            </svg>
+          </button>
+          {showDrawing && (
+            <DrawingPicker notePath={notePath} onInsert={insertAtCursor} onClose={() => setShowDrawing(false)} />
+          )}
+        </div>
 
         {/* Flowchart button */}
         <div className="relative">

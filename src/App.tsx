@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useSettings, useTree, useNote, useNodeOps } from "./hooks/useTauri";
 import { useSearch, useTags } from "./hooks/useSearch";
-import TreeView from "./components/TreeView";
+import TreeView, { existingNotePath } from "./components/TreeView";
 import Editor, { type EditorHandle } from "./components/Editor";
 import DashboardView, { isDashboardNote } from "./components/DashboardView";
 import Preview from "./components/Preview";
@@ -23,7 +23,7 @@ import QuickSwitcher from "./components/QuickSwitcher";
 import CalendarPanel from "./components/CalendarPanel";
 import TasksPanel from "./components/TasksPanel";
 import type { TreeNode } from "./types";
-import { DRAWING_TEMPLATE, drawingMeta, isDrawingPath, isMermaidPath, linkDrawingInNote, mermaidKey, mermaidToElements, sceneJson, withDrawingMeta } from "./utils/drawing";
+import { DRAWING_TEMPLATE, drawingMeta, drawingName, isDrawingPath, isMermaidPath, isObsidianDrawingPath, linkDrawingInNote, mermaidKey, mermaidToElements, sceneJson, withDrawingMeta } from "./utils/drawing";
 import {
   addToUserLibrary,
   createDrawingUnique,
@@ -184,7 +184,8 @@ export default function App() {
     title: string;
     placeholder: string;
     withTemplates?: boolean;
-    onConfirm: (val: string, template?: string, answers?: Record<string, string>) => void;
+    onConfirm: (val: string, template?: string, answers?: Record<string, string>) => void | Promise<void>;
+    onOpenExisting?: (val: string, template?: string) => void;
   } | null>(null);
 
   // Refs for drag-drop handler to access latest state
@@ -406,6 +407,13 @@ export default function App() {
     setBackStack((s) => s.slice(0, -1));
     await handleSelectNote(prev, { fromBack: true });
   }, [backStack, handleSelectNote, closeNote]);
+
+  // A drawing created from the editor's "Insert drawing" picker.
+  useEffect(() => {
+    const onTreeChanged = () => refreshTree();
+    window.addEventListener("martall:tree-changed", onTreeChanged);
+    return () => window.removeEventListener("martall:tree-changed", onTreeChanged);
+  }, [refreshTree]);
 
   // Cmd/Ctrl+[ goes back (like a browser). Not in drawings: there Excalidraw
   // uses it for "send backward"; use the Back / Close buttons instead.
@@ -714,11 +722,16 @@ ${previewEl.innerHTML}
       placeholder: "Note name",
       withTemplates: true,
       onConfirm: async (name, template, answers) => {
-        setInputDialog(null);
+        // Close only once created: an error (name taken) keeps the dialog open.
         await handleCreateNote(currentFolder, name, template, answers);
+        setInputDialog(null);
+      },
+      onOpenExisting: (name, template) => {
+        setInputDialog(null);
+        handleSelectNote(existingNotePath(currentFolder, name, template));
       },
     });
-  }, [currentFolder, handleCreateNote]);
+  }, [currentFolder, handleCreateNote, handleSelectNote]);
 
   const triggerNewFolder = useCallback(() => {
     setInputDialog({
@@ -940,7 +953,7 @@ ${previewEl.innerHTML}
             <button
               onClick={() => goBack()}
               className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 hover:text-accent transition-colors flex-shrink-0"
-              title={`Back to ${backStack[backStack.length - 1].split(/[\\/]/).pop()?.replace(/\.(md|excalidraw|mmd)$/, "")} (⌘[)`}
+              title={`Back to ${backStack[backStack.length - 1].split(/[\\/]/).pop()?.replace(/\.excalidraw\.md$|\.(md|excalidraw|mmd)$/, "")} (⌘[)`}
             >
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M10 3L5 8l5 5" />
@@ -960,7 +973,7 @@ ${previewEl.innerHTML}
                 rel = rel.slice(root.length).replace(/^[\\/]+/, "");
               }
               const parts = rel.split(/[\\/]/);
-              const filename = (parts.pop() || "").replace(/\.(md|excalidraw|mmd)$/, "");
+              const filename = (parts.pop() || "").replace(/\.excalidraw\.md$|\.(md|excalidraw|mmd)$/, "");
               return (
                 <div className="flex items-center gap-1 min-w-0 text-sm truncate">
                   {parts.map((folder, i) => (
@@ -1135,7 +1148,8 @@ ${previewEl.innerHTML}
             >
               <DrawingView
                 key={note.path}
-                name={note.path.split(/[/\\]/).pop()!.replace(/\.excalidraw$/i, "")}
+                name={drawingName(note.path)}
+                obsidian={isObsidianDrawingPath(note.path)}
                 content={note.content}
                 darkMode={settings.dark_theme}
                 onChange={updateContent}
@@ -1246,6 +1260,7 @@ ${previewEl.innerHTML}
           placeholder={inputDialog.placeholder}
           withTemplates={inputDialog.withTemplates}
           onConfirm={inputDialog.onConfirm}
+          onOpenExisting={inputDialog.onOpenExisting}
           onCancel={() => setInputDialog(null)}
         />
       )}

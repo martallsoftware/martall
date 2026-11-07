@@ -9,9 +9,20 @@ interface Props {
   confirmLabel?: string;
   /** Show a template picker (files in the vault's `Templates/` folder). */
   withTemplates?: boolean;
-  /** `answers` holds the template's `{{ask:Label}}` values, keyed by label. */
-  onConfirm: (value: string, template?: string, answers?: Record<string, string>) => void;
+  /**
+   * `answers` holds the template's `{{ask:Label}}` values, keyed by label.
+   * If it rejects (e.g. the note already exists) the dialog stays open and says why.
+   */
+  onConfirm: (value: string, template?: string, answers?: Record<string, string>) => void | Promise<void>;
   onCancel: () => void;
+  /** Shown as "Open it" when a note with the typed name already exists. */
+  onOpenExisting?: (value: string, template?: string) => void;
+}
+
+/** "Plan" → "Plan 2", "Plan 2" → "Plan 3"; a year like "Sprint 2026" is not a counter. */
+function nextName(name: string): string {
+  const m = name.match(/^(.*?)\s+(\d{1,3})$/);
+  return m ? `${m[1]} ${Number(m[2]) + 1}` : `${name} 2`;
 }
 
 export default function InputDialog({
@@ -22,7 +33,12 @@ export default function InputDialog({
   withTemplates = false,
   onConfirm,
   onCancel,
+  onOpenExisting,
 }: Props) {
+  const [error, setError] = useState<string | null>(null);
+  /** The name that clashed with an existing note. */
+  const [exists, setExists] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const [value, setValue] = useState(defaultValue);
   const [templates, setTemplates] = useState<string[]>([]);
   const [template, setTemplate] = useState("");
@@ -53,10 +69,26 @@ export default function InputDialog({
     inputRef.current?.select();
   }, []);
 
-  const handleSubmit = () => {
-    const trimmed = value.trim();
-    if (trimmed) onConfirm(trimmed, template || undefined, template ? answers : undefined);
+  const submit = async (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed || busy) return;
+    setBusy(true);
+    setError(null);
+    setExists(null);
+    try {
+      await onConfirm(trimmed, template || undefined, template ? answers : undefined);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/already exists/i.test(msg)) {
+        setValue(trimmed);
+        setExists(trimmed);
+      } else {
+        setError(msg);
+      }
+    }
+    setBusy(false);
   };
+  const handleSubmit = () => submit(value);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
@@ -128,6 +160,28 @@ export default function InputDialog({
             </label>
           ))}
         </div>
+        {exists && (
+          <div className="mx-5 mb-4 -mt-1 rounded-lg border border-amber-400/50 bg-amber-50 dark:bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+            <p>A note called “{exists}” already exists in this folder.</p>
+            <div className="mt-2 flex gap-2">
+              {onOpenExisting && (
+                <button
+                  onClick={() => onOpenExisting(exists, template || undefined)}
+                  className="px-2.5 py-1 rounded-md border border-amber-500/50 hover:bg-amber-500/10"
+                >
+                  Open it
+                </button>
+              )}
+              <button
+                onClick={() => submit(nextName(exists))}
+                className="px-2.5 py-1 rounded-md bg-accent text-white hover:bg-accent/90"
+              >
+                Create “{nextName(exists)}”
+              </button>
+            </div>
+          </div>
+        )}
+        {error && <p className="mx-5 mb-4 -mt-1 text-xs text-red-500">{error}</p>}
         <div className="flex justify-end gap-2 px-5 py-3 border-t border-gray-200 dark:border-gray-700">
           <button
             onClick={onCancel}
