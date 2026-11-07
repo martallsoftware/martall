@@ -24,6 +24,15 @@ import CalendarPanel from "./components/CalendarPanel";
 import TasksPanel from "./components/TasksPanel";
 import type { TreeNode } from "./types";
 import { drawingMeta, isDrawingPath, linkDrawingInNote, mermaidKey, mermaidToElements, sceneJson, withDrawingMeta } from "./utils/drawing";
+import {
+  addToUserLibrary,
+  importExcalidrawFiles,
+  INSERT_SCENE_EVENT,
+  isDrawingImportPath,
+  isLibraryPath,
+  parseDrawingFile,
+  parseLibraryFile,
+} from "./utils/drawingImport";
 import CloseDrawingDialog, { type CloseDrawingChoice } from "./components/CloseDrawingDialog";
 
 // Excalidraw is large; load the drawing editor only when a drawing opens.
@@ -183,6 +192,8 @@ export default function App() {
   // Callback ref: when import dialog is open, it registers here to receive dropped files
   const importDropCallback = useRef<((files: string[]) => void) | null>(null);
   const editorRef = useRef<EditorHandle>(null);
+  // The drop handler below is set up before handleSelectNote exists.
+  const handleSelectNoteRef = useRef<(path: string) => Promise<void>>(async () => {});
 
   const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".ico"];
 
@@ -197,13 +208,53 @@ export default function App() {
 
       const mdFiles: string[] = [];
       const imageFiles: string[] = [];
+      const excalidrawFiles: string[] = [];
 
       for (const filePath of event.payload.paths) {
         const lower = filePath.toLowerCase();
-        if (lower.endsWith(".md")) {
+        // Before ".md": Obsidian drawings end in ".excalidraw.md".
+        if (isDrawingImportPath(filePath) || isLibraryPath(filePath)) {
+          excalidrawFiles.push(filePath);
+        } else if (lower.endsWith(".md")) {
           mdFiles.push(filePath);
         } else if (IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext))) {
           imageFiles.push(filePath);
+        }
+      }
+
+      // Import dialog open: it collects every dropped file.
+      if (showImportRef.current && importDropCallback.current && excalidrawFiles.length > 0) {
+        importDropCallback.current(excalidrawFiles);
+      } else if (excalidrawFiles.length > 0) {
+        const current = noteRef.current;
+        if (current && isDrawingPath(current.path)) {
+          // A drawing is open: drawings go onto its canvas, libraries into its Library.
+          for (const filePath of excalidrawFiles) {
+            try {
+              const { content } = await invoke<{ content: string }>("read_note", { path: filePath });
+              if (isLibraryPath(filePath)) {
+                addToUserLibrary(parseLibraryFile(content));
+              } else {
+                const scene = parseDrawingFile(filePath, content);
+                window.dispatchEvent(
+                  new CustomEvent(INSERT_SCENE_EVENT, { detail: { elements: scene.elements, files: scene.files } }),
+                );
+              }
+            } catch (err) {
+              console.error("Failed to import", filePath, err);
+            }
+          }
+        } else {
+          // Otherwise: new drawings in the vault root; open the first one.
+          try {
+            const res = await importExcalidrawFiles(excalidrawFiles, settingsRef.current.notes_directory);
+            await refreshTree();
+            refreshTags();
+            if (res.imported.length > 0) await handleSelectNoteRef.current(res.imported[0].path);
+            if (res.skipped.length) console.warn("Excalidraw import:", res.skipped);
+          } catch (err) {
+            console.error("Failed to import drawings:", err);
+          }
         }
       }
 
@@ -366,6 +417,8 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [goBack]);
+
+  handleSelectNoteRef.current = (path) => handleSelectNote(path);
 
   const handleSelectSearchResult = useCallback(
     async (result: import("./types").SearchResult) => {
@@ -1072,6 +1125,7 @@ ${previewEl.innerHTML}
             >
               <DrawingView
                 key={note.path}
+                name={note.path.split(/[/\\]/).pop()!.replace(/\.excalidraw$/i, "")}
                 content={note.content}
                 darkMode={settings.dark_theme}
                 onChange={updateContent}
@@ -1188,6 +1242,7 @@ ${previewEl.innerHTML}
       {showImport && (
         <ImportDialog
           folders={tree}
+          rootDir={settings.notes_directory}
           onDone={() => {
             refreshTree();
             refreshTags();

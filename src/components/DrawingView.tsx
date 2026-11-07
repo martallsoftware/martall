@@ -1,49 +1,94 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CaptureUpdateAction,
   Excalidraw,
+  exportToBlob,
+  exportToCanvas,
+  exportToSvg,
   MainMenu,
   getCommonBounds,
   getSceneVersion,
+  restoreElements,
   serializeAsJSON,
 } from "@excalidraw/excalidraw";
-import type { ExcalidrawImperativeAPI, LibraryItems } from "@excalidraw/excalidraw/types";
+import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
+import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import "@excalidraw/excalidraw/index.css";
 import { drawingMeta, parseScene, withDrawingMeta } from "../utils/drawing";
+import { bytesToBase64, canvasToPdf } from "../utils/pdf";
 import { builtinLibrary, DEFAULT_APP_STATE, mermaidToElements } from "../utils/drawingShapes";
+import {
+  addToUserLibrary,
+  INSERT_SCENE_EVENT,
+  isLibraryPath,
+  LIBRARY_EVENT,
+  loadUserLibrary,
+  parseDrawingFile,
+  parseLibraryFile,
+  saveUserLibrary,
+  toObsidianMarkdown,
+} from "../utils/drawingImport";
 
 // Fonts are bundled in public/excalidraw-assets so drawing works offline.
 (window as unknown as { EXCALIDRAW_ASSET_PATH: string }).EXCALIDRAW_ASSET_PATH =
   window.location.origin + "/excalidraw-assets/";
 
-const LIBRARY_KEY = "martall_drawing_library";
-
-function loadUserLibrary(): LibraryItems {
-  try {
-    const raw = localStorage.getItem(LIBRARY_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
+/**
+ * Give pasted-in elements fresh ids (and group ids) so importing the same
+ * drawing twice, or into itself, never clashes; bindings follow the new ids.
+ */
+function withFreshIds(elements: readonly any[]): any[] {
+  const ids = new Map<string, string>();
+  const groups = new Map<string, string>();
+  const fresh = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+  for (const el of elements) ids.set(el.id, fresh());
+  const id = (v: string | null | undefined) => (v && ids.get(v)) || v;
+  const group = (g: string) => {
+    if (!groups.has(g)) groups.set(g, fresh());
+    return groups.get(g)!;
+  };
+  return elements.map((el) => ({
+    ...el,
+    id: ids.get(el.id),
+    groupIds: (el.groupIds ?? []).map(group),
+    containerId: id(el.containerId) ?? null,
+    frameId: id(el.frameId) ?? null,
+    boundElements: el.boundElements?.map((b: any) => ({ ...b, id: id(b.id) })) ?? null,
+    startBinding: el.startBinding ? { ...el.startBinding, elementId: id(el.startBinding.elementId) } : el.startBinding,
+    endBinding: el.endBinding ? { ...el.endBinding, elementId: id(el.endBinding.elementId) } : el.endBinding,
+  }));
 }
 
-function saveUserLibrary(items: LibraryItems) {
-  // Built-in shapes are re-added on every load; only store the user's own.
-  const own = items.filter((i) => !i.id.startsWith("martall-"));
-  try {
-    localStorage.setItem(LIBRARY_KEY, JSON.stringify(own));
-  } catch {
-    /* storage full or unavailable */
-  }
+type ExportKind = "excalidraw" | "obsidian" | "png" | "svg" | "pdf";
+
+const EXPORTS: Record<ExportKind, { label: string; ext: string; suffix: string }> = {
+  excalidraw: { label: "Excalidraw drawing", ext: "excalidraw", suffix: ".excalidraw" },
+  obsidian: { label: "Obsidian Excalidraw note", ext: "md", suffix: ".excalidraw.md" },
+  png: { label: "PNG image", ext: "png", suffix: ".png" },
+  svg: { label: "SVG image", ext: "svg", suffix: ".svg" },
+  pdf: { label: "PDF document", ext: "pdf", suffix: ".pdf" },
+};
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
 }
 
 interface Props {
+  /** Drawing name, used as the default file name when exporting. */
+  name: string;
   content: string;
   darkMode: boolean;
   onChange: (content: string) => void;
 }
 
-export default function DrawingView({ content, darkMode, onChange }: Props) {
+export default function DrawingView({ name, content, darkMode, onChange }: Props) {
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
   const [mermaidOpen, setMermaidOpen] = useState(false);
 
@@ -81,10 +126,17 @@ export default function DrawingView({ content, darkMode, onChange }: Props) {
     [onChange, meta],
   );
 
-  const insertMermaid = useCallback(async (code: string) => {
+  const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 5000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
+  /** Add elements next to what is already on the canvas and zoom to them. */
+  const insertElements = useCallback((elements: readonly any[], files: Record<string, any>) => {
     const api = apiRef.current;
-    if (!api) return;
-    const { elements, files } = await mermaidToElements(code);
+    if (!api || elements.length === 0) return;
     const existing = api.getSceneElements();
     // Place the new diagram to the right of what is already on the canvas.
     let dx = 0;
@@ -102,6 +154,153 @@ export default function DrawingView({ content, darkMode, onChange }: Props) {
     });
     api.scrollToContent(shifted, { fitToContent: true, animate: true });
   }, []);
+
+  const insertMermaid = useCallback(
+    async (code: string) => {
+      const { elements, files } = await mermaidToElements(code);
+      insertElements(elements, files);
+    },
+    [insertElements],
+  );
+
+  /** A drawing file's elements, restored to the current format with fresh ids. */
+  const insertScene = useCallback(
+    (elements: readonly any[], files: Record<string, any>) => {
+      insertElements(withFreshIds(restoreElements(elements as any, null)), files);
+    },
+    [insertElements],
+  );
+
+  // Files dropped on the app while this drawing is open, and libraries
+  // imported from anywhere, arrive as window events.
+  useEffect(() => {
+    const onInsert = (e: Event) => {
+      const { elements, files } = (e as CustomEvent).detail;
+      insertScene(elements, files ?? {});
+    };
+    const onLibrary = (e: Event) => {
+      const items = (e as CustomEvent).detail as any[];
+      if (items?.length) apiRef.current?.updateLibrary({ libraryItems: items, merge: true, openLibraryMenu: true });
+    };
+    window.addEventListener(INSERT_SCENE_EVENT, onInsert);
+    window.addEventListener(LIBRARY_EVENT, onLibrary);
+    return () => {
+      window.removeEventListener(INSERT_SCENE_EVENT, onInsert);
+      window.removeEventListener(LIBRARY_EVENT, onLibrary);
+    };
+  }, [insertScene]);
+
+  // "Browse libraries" is a link to a new tab, which the app window can't open.
+  // Open the site in the system browser instead; downloaded .excalidrawlib
+  // files are then dropped on the app (or picked via ☰ → Import file…).
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      const link = (e.target as HTMLElement | null)?.closest?.("a.library-menu-browse-button");
+      if (!link) return;
+      e.preventDefault();
+      e.stopPropagation();
+      openUrl(`https://libraries.excalidraw.com/?theme=${darkMode ? "dark" : "light"}`).catch((err) =>
+        console.error("Could not open browser:", err),
+      );
+      setNotice(
+        "Opened libraries.excalidraw.com in your browser.\nClick Download on a library, then drop the .excalidrawlib file here.",
+      );
+    };
+    document.addEventListener("click", onClick, true);
+    return () => document.removeEventListener("click", onClick, true);
+  }, [darkMode]);
+
+  /** ☰ → Export: write the drawing (or a picture of it) to a file the user picks. */
+  const exportAs = useCallback(
+    async (kind: ExportKind) => {
+      const api = apiRef.current;
+      if (!api) return;
+      const elements = api.getSceneElements();
+      if (elements.length === 0) {
+        setNotice("Nothing to export yet");
+        return;
+      }
+      const spec = EXPORTS[kind];
+      const path = await saveFileDialog({
+        defaultPath: `${name}${spec.suffix}`,
+        filters: [{ name: spec.label, extensions: [spec.ext] }],
+      });
+      if (!path) return;
+      try {
+        const appState = api.getAppState();
+        const files = api.getFiles();
+        // Pictures use the canvas background and the current theme.
+        const imageState = { ...appState, exportBackground: true, exportWithDarkMode: darkMode, exportPadding: 20 };
+        let contents: string;
+        let base64 = false;
+        if (kind === "pdf") {
+          // Up to 3× resolution, capped so huge drawings stay a sane file size.
+          const canvas = await exportToCanvas({
+            elements,
+            appState: imageState,
+            files,
+            getDimensions: (w: number, h: number) => {
+              const scale = Math.max(1, Math.min(3, 6000 / Math.max(w, h)));
+              return { width: Math.round(w * scale), height: Math.round(h * scale), scale };
+            },
+          });
+          contents = bytesToBase64(await canvasToPdf(canvas, name));
+          base64 = true;
+        } else if (kind === "png") {
+          const blob = await exportToBlob({
+            elements,
+            appState: imageState,
+            files,
+            mimeType: "image/png",
+            getDimensions: (w: number, h: number) => ({ width: w * 2, height: h * 2, scale: 2 }),
+          });
+          contents = await blobToBase64(blob);
+          base64 = true;
+        } else if (kind === "svg") {
+          contents = (await exportToSvg({ elements, appState: imageState, files })).outerHTML;
+        } else {
+          const json = serializeAsJSON(elements, appState, files, "local");
+          contents = kind === "obsidian" ? toObsidianMarkdown(json) : json;
+        }
+        await invoke("write_export_file", { path, contents, base64 });
+        setNotice(`Exported ${path.split(/[/\\]/).pop()}`);
+      } catch (err) {
+        setNotice(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+    [name, darkMode],
+  );
+
+  /** ☰ → Import file…: a drawing is added to this canvas, a library to the Library panel. */
+  const importFile = useCallback(async () => {
+    const picked = await openFileDialog({
+      multiple: true,
+      filters: [
+        { name: "Excalidraw", extensions: ["excalidraw", "md", "json", "excalidrawlib"] },
+      ],
+    });
+    const paths = (Array.isArray(picked) ? picked : picked ? [picked] : []).filter(
+      (p): p is string => typeof p === "string",
+    );
+    const messages: string[] = [];
+    for (const path of paths) {
+      const name = path.split(/[/\\]/).pop() ?? path;
+      try {
+        const { content } = await invoke<{ content: string }>("read_note", { path });
+        if (isLibraryPath(path)) {
+          const n = addToUserLibrary(parseLibraryFile(content));
+          messages.push(`${name}: ${n} shape${n === 1 ? "" : "s"} added to the library`);
+        } else {
+          const scene = parseDrawingFile(path, content);
+          insertScene(scene.elements, scene.files);
+          messages.push(`${name}: added`, ...scene.warnings.map((w) => `${name}: ${w}`));
+        }
+      } catch (err) {
+        messages.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (messages.length) setNotice(messages.join("\n"));
+  }, [insertScene]);
 
   return (
     <div className="h-full w-full martall-drawing">
@@ -133,7 +332,17 @@ export default function DrawingView({ content, darkMode, onChange }: Props) {
       >
         <MainMenu>
           <MainMenu.Item onSelect={() => setMermaidOpen(true)}>Import Mermaid…</MainMenu.Item>
+          <MainMenu.Item onSelect={importFile}>Import file… (drawing or library)</MainMenu.Item>
+          <MainMenu.Separator />
+          <MainMenu.Group title="Export">
+            <MainMenu.Item onSelect={() => exportAs("excalidraw")}>Excalidraw file (.excalidraw)…</MainMenu.Item>
+            <MainMenu.Item onSelect={() => exportAs("obsidian")}>Obsidian note (.excalidraw.md)…</MainMenu.Item>
+            <MainMenu.Item onSelect={() => exportAs("png")}>PNG image…</MainMenu.Item>
+            <MainMenu.Item onSelect={() => exportAs("svg")}>SVG image…</MainMenu.Item>
+            <MainMenu.Item onSelect={() => exportAs("pdf")}>PDF (A4)…</MainMenu.Item>
+          </MainMenu.Group>
           <MainMenu.DefaultItems.SaveAsImage />
+          <MainMenu.Separator />
           <MainMenu.DefaultItems.SearchMenu />
           <MainMenu.DefaultItems.ClearCanvas />
           <MainMenu.Separator />
@@ -141,6 +350,12 @@ export default function DrawingView({ content, darkMode, onChange }: Props) {
           <MainMenu.DefaultItems.Help />
         </MainMenu>
       </Excalidraw>
+
+      {notice && (
+        <div className="fixed bottom-16 left-1/2 -translate-x-1/2 z-50 max-w-lg whitespace-pre-line rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-[#232329] px-4 py-2 text-xs text-gray-700 dark:text-gray-200 shadow-lg">
+          {notice}
+        </div>
+      )}
 
       {mermaidOpen && (
         <MermaidImportDialog

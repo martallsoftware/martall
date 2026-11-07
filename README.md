@@ -165,8 +165,27 @@ Obsidian Excalidraw plugin use).
   drawing work.
 - **Back / Close:** the header shows **‹ Back** (to the note you came from)
   and, on a drawing, **✕ Close**. In notes, ⌘[ also goes back.
-- **Export:** ☰ → *Export image…* → *Copy to clipboard* (PNG), then paste
-  anywhere.
+- **Import Excalidraw files:**
+  - *Into the vault:* drop `.excalidraw` files (from excalidraw.com) or
+    Obsidian Excalidraw notes (`.excalidraw.md`, compressed or not) on the app,
+    or use the sidebar **Import** dialog (pick the target folder there). Each
+    becomes a drawing; names already taken get " 2" etc. Images embedded in
+    Obsidian drawings are not brought along.
+  - *Into the open drawing:* ☰ → **Import file…**, or drop the file while a
+    drawing is open. The shapes are added next to what is already there.
+  - *Shape libraries:* drop or import `.excalidrawlib` files (e.g. AWS,
+    Kubernetes, UML packs from libraries.excalidraw.com). The shapes appear in
+    the **Library** panel and are remembered. **Browse libraries** in the
+    Library panel opens that site in your browser; click *Download* there and
+    drop the file on the app.
+- **Export:** ☰ → *Export* saves the drawing to a file you choose:
+  *Excalidraw file* (`.excalidraw`, opens on excalidraw.com and in other
+  Excalidraw tools), *Obsidian note* (`.excalidraw.md` for the Obsidian
+  Excalidraw plugin), *PNG image* (2× resolution), *SVG image* or *PDF (A4)*
+  (the drawing fitted on one A4 page, landscape or portrait to match, rendered
+  sharp at up to 3×; made in the app, nothing extra to install). Images
+  use the canvas background and the current light/dark theme. *Export
+  image…* below it copies a PNG to the clipboard.
 
 ### UI
 - **Movable split divider** between editor and preview. Drag to resize,

@@ -2,15 +2,20 @@ import { useState, useCallback, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import type { TreeNode } from "../types";
+import { importExcalidrawFiles, isDrawingImportPath, isLibraryPath } from "../utils/drawingImport";
 
 interface ImportResult {
   imported_count: number;
   skipped: string[];
   imported: string[];
+  /** Shapes added to the drawing library from .excalidrawlib files. */
+  library_items?: number;
 }
 
 interface Props {
   folders: TreeNode[];
+  /** Vault root, where drawings go when no folder is chosen. */
+  rootDir: string;
   onDone: () => void;
   onClose: () => void;
   /** Register a callback ref so the parent can send dropped files to this dialog */
@@ -32,7 +37,7 @@ function flattenFolders(
   return result;
 }
 
-export default function ImportDialog({ folders, onDone, onClose, dropCallbackRef }: Props) {
+export default function ImportDialog({ folders, rootDir, onDone, onClose, dropCallbackRef }: Props) {
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [targetFolder, setTargetFolder] = useState("");
   const [importing, setImporting] = useState(false);
@@ -60,7 +65,9 @@ export default function ImportDialog({ folders, onDone, onClose, dropCallbackRef
     try {
       const files = await open({
         multiple: true,
-        filters: [{ name: "Markdown", extensions: ["md"] }],
+        filters: [
+          { name: "Notes and drawings", extensions: ["md", "excalidraw", "json", "excalidrawlib"] },
+        ],
       });
       if (files) {
         const paths = Array.isArray(files) ? files : [files];
@@ -75,10 +82,20 @@ export default function ImportDialog({ folders, onDone, onClose, dropCallbackRef
     if (selectedFiles.length === 0) return;
     setImporting(true);
     try {
-      const res = await invoke<ImportResult>("import_notes", {
-        filePaths: selectedFiles,
-        targetFolder: targetFolder || null,
-      });
+      // Excalidraw drawings (incl. Obsidian's .excalidraw.md) and libraries are
+      // converted here; plain .md notes go to the backend as before.
+      const excalidraw = selectedFiles.filter((f) => isDrawingImportPath(f) || isLibraryPath(f));
+      const notes = selectedFiles.filter((f) => !excalidraw.includes(f));
+      const res: ImportResult = notes.length
+        ? await invoke<ImportResult>("import_notes", { filePaths: notes, targetFolder: targetFolder || null })
+        : { imported_count: 0, skipped: [], imported: [] };
+      if (excalidraw.length) {
+        const d = await importExcalidrawFiles(excalidraw, targetFolder || rootDir);
+        res.imported_count += d.imported.length;
+        res.imported.push(...d.imported.map((i) => `${i.name} (drawing)`));
+        res.skipped.push(...d.skipped);
+        res.library_items = d.libraryItems;
+      }
       setResult(res);
       onDone();
     } catch (err) {
@@ -97,7 +114,7 @@ export default function ImportDialog({ folders, onDone, onClose, dropCallbackRef
       <div className="w-[440px] max-h-[520px] flex flex-col rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#1e1e2e] shadow-2xl">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 dark:border-gray-700">
-          <h2 className="text-sm font-semibold">Import Notes</h2>
+          <h2 className="text-sm font-semibold">Import notes and drawings</h2>
           <button
             onClick={onClose}
             className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-xl leading-none"
@@ -123,7 +140,8 @@ export default function ImportDialog({ folders, onDone, onClose, dropCallbackRef
                 <path d="M6.5 10l2.5 2.5 5-5" />
               </svg>
               <span className="text-sm font-medium">
-                {result.imported_count} note{result.imported_count !== 1 ? "s" : ""} imported
+                {result.imported_count} file{result.imported_count !== 1 ? "s" : ""} imported
+                {result.library_items ? ` · ${result.library_items} shapes added to the drawing library` : ""}
               </span>
             </div>
 
@@ -160,7 +178,7 @@ export default function ImportDialog({ folders, onDone, onClose, dropCallbackRef
             {/* File picker */}
             <div>
               <label className="text-xs font-medium text-gray-700 dark:text-gray-300 block mb-2">
-                Select .md files
+                Select .md notes, Excalidraw drawings (.excalidraw, Obsidian .excalidraw.md) or libraries (.excalidrawlib)
               </label>
               <button
                 onClick={handlePickFiles}
