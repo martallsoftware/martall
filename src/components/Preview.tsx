@@ -14,10 +14,11 @@ import TaskDialog from "./TaskDialog";
 import { applyTaskEdit, parseTaskLine, toggleTaskDone, type Task } from "../utils/task";
 import { todayIso } from "../utils/routine";
 import type { NoteInfo } from "../types";
-import { isDrawingPath } from "../utils/drawing";
+import { isDrawingPath, isMermaidPath } from "../utils/drawing";
 
 // Excalidraw is large; only load it when a note embeds a drawing.
 const DrawingEmbed = lazy(() => import("./DrawingEmbed"));
+const MermaidEmbed = lazy(() => import("./MermaidEmbed"));
 
 interface Props {
   content: string;
@@ -689,6 +690,18 @@ export default function Preview({ content, notePath, darkMode = true, onOpenNote
                   return (
                     <Suspense fallback={<span className="text-xs text-gray-400">Loading drawing…</span>}>
                       <DrawingEmbed
+                        path={resolved}
+                        title={target}
+                        dark={darkMode}
+                        onOpen={onOpenNote ? () => onOpenNote(resolved) : undefined}
+                      />
+                    </Suspense>
+                  );
+                }
+                if (typeof resolved === "string" && isMermaidPath(resolved)) {
+                  return (
+                    <Suspense fallback={<span className="text-xs text-gray-400">Loading diagram…</span>}>
+                      <MermaidEmbed
                         path={resolved}
                         title={target}
                         dark={darkMode}

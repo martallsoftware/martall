@@ -359,14 +359,23 @@ fn rel_path(file_path: &Path, notes_dir: &Path) -> Option<String> {
 pub const DRAWING_EXT: &str = "excalidraw";
 
 /// Notes (`.md`) and drawings (`.excalidraw`) are both indexed.
+/// File extension of Mermaid diagram files.
+pub const MERMAID_EXT: &str = "mmd";
+
 pub fn is_indexable(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| ext == "md" || ext == DRAWING_EXT)
+    path.extension().is_some_and(|ext| ext == "md" || ext == DRAWING_EXT || ext == MERMAID_EXT)
 }
 
 /// Text to index for a file: markdown as-is; for a drawing, the text of its
 /// live elements (one per line), so drawings are searchable and linkable
 /// without indexing colours like `#dcfce7` as tags.
 pub fn index_text(path: &Path, content: &str) -> String {
+    if path.extension().is_some_and(|ext| ext == MERMAID_EXT) {
+        // Searchable as text, but `fill:#dcfce7` must not become a #tag.
+        static HEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+        let hex = HEX.get_or_init(|| Regex::new(r"#[0-9a-fA-F]{3,8}\b").unwrap());
+        return hex.replace_all(content, "").into_owned();
+    }
     if !path.extension().is_some_and(|ext| ext == DRAWING_EXT) {
         return content.to_string();
     }
@@ -392,6 +401,9 @@ pub fn note_kind(rel_path: &str, content: &str) -> &'static str {
     let rp = rel_path.replace('\\', "/");
     if rp.to_lowercase().ends_with(&format!(".{}", DRAWING_EXT)) {
         return "drawing";
+    }
+    if rp.to_lowercase().ends_with(&format!(".{}", MERMAID_EXT)) {
+        return "mermaid";
     }
     if rp.starts_with("Templates/") {
         return "template";
@@ -442,7 +454,8 @@ pub fn note_kinds(conn: &Connection) -> HashMap<String, String> {
         if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
             for (rp, content) in rows.flatten() {
                 let kind = note_kind(&rp, &content).to_string();
-                map.insert(rp, kind);
+                // Keys use "/" like the tree's lookup (Windows stores "\\").
+                map.insert(rp.replace('\\', "/"), kind);
             }
         }
     }
@@ -1239,6 +1252,7 @@ mod kind_tests {
     #[test]
     fn detects_note_kinds() {
         assert_eq!(note_kind("a/x.excalidraw", ""), "drawing");
+        assert_eq!(note_kind("Templates/Flowchart.mmd", ""), "mermaid");
         assert_eq!(note_kind("Templates/Todo.md", "- [ ] x #routine"), "template");
         assert_eq!(note_kind("Daily/2026-11-07.md", "- [ ] x"), "daily");
         assert_eq!(note_kind("Gym.md", "# Legs\n#routine\n- [ ] Squat"), "routine");
@@ -1266,6 +1280,7 @@ mod drawing_tests {
         assert_eq!(t, "Hermes worker\nsee [[Fluxa]] #pipeline");
         assert_eq!(index_text(Path::new("x.md"), "#tag"), "#tag");
         assert_eq!(index_text(Path::new("bad.excalidraw"), "not json"), "");
+        assert_eq!(index_text(Path::new("a.mmd"), "classDef r fill:#dcfce7,stroke:#15803d #arch"), "classDef r fill:,stroke: #arch");
     }
 }
 

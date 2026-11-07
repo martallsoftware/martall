@@ -595,6 +595,27 @@ gantt\n\
 ## Log\n"),
 ];
 
+/// Mermaid starter files (`.mmd`): listed with their extension, and a note
+/// created from one is a `.mmd` file too. Colours match the drawing library:
+/// green = ready, amber dashed = to do, grey dashed = external, blue = records.
+const MERMAID_TEMPLATES: &[(&str, &str)] = &[
+    ("Flowchart.mmd", "---\ntitle: {{title}}\n---\n%% {{date}}\nflowchart TD\n    start([Start]) --> step[Do something]\n    step --> check{OK?}\n    check -->|Yes| done([Done])\n    check -->|No| fix[Fix it]\n    fix --> step\n"),
+    ("Sequence.mmd", "---\ntitle: {{title}}\n---\n%% {{date}}\nsequenceDiagram\n    autonumber\n    actor User\n    participant App\n    participant API\n    participant DB\n    User->>App: Action\n    App->>API: Request\n    API->>DB: Query\n    DB-->>API: Rows\n    alt error\n        API-->>App: 4xx / 5xx\n    else ok\n        API-->>App: Response\n    end\n    App-->>User: Result\n"),
+    ("Architecture.mmd", "---\ntitle: {{title}}\n---\n%% {{date}}\n%% Green = in place. Amber dashed = to do. Grey dashed = external. Blue = records.\nflowchart LR\n\n  subgraph src[\"Sources\"]\n    direction TB\n    client[\"Client app\"]\n    partner[\"Partner system<br/>webhooks\"]\n  end\n\n  subgraph svc[\"Service\"]\n    direction TB\n    api[\"API<br/>auth · validation\"]\n    worker[\"Worker<br/>jobs · retries\"]\n    api -. \"enqueue\" .-> worker\n  end\n\n  db@{ shape: cyl, label: \"Database\" }\n  store@{ shape: lin-cyl, label: \"Object storage<br/>30-day copy\" }\n  audit@{ shape: h-cyl, label: \"Audit log\" }\n\n  client ==>|\"① request\"| api\n  partner -->|\"② webhook\"| api\n  worker ==>|\"③ write\"| db\n  worker -->|\"④ archive\"| store\n  worker -.-> audit\n\n  classDef ready fill:#dcfce7,stroke:#15803d,color:#0b2e17\n  classDef todo  fill:#fef3c7,stroke:#b45309,color:#3b2405,stroke-dasharray:5 4\n  classDef ext   fill:#f3f4f6,stroke:#6b7280,color:#111111,stroke-dasharray:4 3\n  classDef info  fill:#dbeafe,stroke:#1d4ed8,color:#0b1b3f\n  class client,partner ext\n  class api,worker,db ready\n  class store todo\n  class audit info\n  linkStyle 1,3 stroke:#15803d,stroke-width:3px\n"),
+    ("State.mmd", "---\ntitle: {{title}}\n---\n%% {{date}}\nstateDiagram-v2\n    [*] --> Draft\n    Draft --> Review: submit\n    Review --> Draft: changes requested\n    Review --> Approved: approve\n    Approved --> Released: deploy\n    Released --> [*]\n"),
+    ("ER diagram.mmd", "---\ntitle: {{title}}\n---\n%% {{date}}\nerDiagram\n    CUSTOMER ||--o{ ORDER : places\n    ORDER ||--|{ ORDER_LINE : contains\n    PRODUCT ||--o{ ORDER_LINE : \"is in\"\n    CUSTOMER {\n        string id PK\n        string name\n        string email\n    }\n    ORDER {\n        string id PK\n        string customer_id FK\n        date created\n    }\n    ORDER_LINE {\n        string order_id FK\n        string product_id FK\n        int quantity\n    }\n    PRODUCT {\n        string id PK\n        string name\n        float price\n    }\n"),
+];
+
+/// Template file name: `.mmd` templates keep their extension, others are `.md`.
+fn template_file(name: &str) -> String {
+    if name.to_lowercase().ends_with(".mmd") {
+        name.to_string()
+    } else {
+        format!("{}.md", name)
+    }
+}
+
+
 /// Write any default template that hasn't been written before.
 fn seed_templates(root: &Path) -> Result<(), String> {
     let dir = root.join(TEMPLATES_FOLDER);
@@ -607,11 +628,11 @@ fn seed_templates(root: &Path) -> Result<(), String> {
         .filter(|l| !l.is_empty())
         .collect();
     let mut changed = false;
-    for (name, body) in DEFAULT_TEMPLATES {
+    for (name, body) in DEFAULT_TEMPLATES.iter().chain(MERMAID_TEMPLATES) {
         if seeded.iter().any(|s| s == name) {
             continue;
         }
-        let path = dir.join(format!("{}.md", name));
+        let path = dir.join(template_file(name));
         if !path.exists() {
             fs::write(&path, body).map_err(|e| e.to_string())?;
         }
@@ -635,8 +656,13 @@ fn list_templates(state: State<'_, AppState>) -> Result<Vec<String>, String> {
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.is_file() && p.extension().map_or(false, |x| x == "md"))
-        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+        .filter(|p| p.is_file())
+        // Markdown templates by stem; Mermaid ones keep ".mmd" so they are told apart.
+        .filter_map(|p| match p.extension().and_then(|x| x.to_str()) {
+            Some("md") => p.file_stem().map(|s| s.to_string_lossy().to_string()),
+            Some("mmd") => p.file_name().map(|s| s.to_string_lossy().to_string()),
+            _ => None,
+        })
         .filter(|n| n != DAILY_TEMPLATE)
         .collect();
     names.sort_by_key(|n| n.to_lowercase());
@@ -651,7 +677,7 @@ fn read_template(root: &Path, name: &str) -> Result<String, String> {
     if name.contains('/') || name.contains('\\') || name.contains("..") {
         return Err("Invalid template name".into());
     }
-    let path = root.join(TEMPLATES_FOLDER).join(format!("{}.md", name));
+    let path = root.join(TEMPLATES_FOLDER).join(template_file(name));
     fs::read_to_string(&path).map_err(|e| format!("Template '{}': {}", name, e))
 }
 
@@ -710,11 +736,12 @@ fn create_note(
     template: Option<String>,
     answers: Option<std::collections::HashMap<String, String>>,
 ) -> Result<String, String> {
-    let file_name = if name.ends_with(".md") {
-        name.clone()
-    } else {
-        format!("{}.md", name)
-    };
+    // A `.mmd` template (or a name ending in .mmd) makes a Mermaid file.
+    let mermaid = template.as_deref().is_some_and(|t| t.to_lowercase().ends_with(".mmd"))
+        || name.to_lowercase().ends_with(".mmd");
+    let ext = if mermaid { "mmd" } else { "md" };
+    let stem = name.strip_suffix(".md").or_else(|| name.strip_suffix(".mmd")).unwrap_or(&name);
+    let file_name = format!("{}.{}", stem, ext);
     let full_path = Path::new(&parent_dir).join(&file_name);
     if full_path.exists() {
         return Err(format!("A note named '{}' already exists", file_name));
@@ -1794,9 +1821,10 @@ mod template_tests {
         let root = temp_vault("seed");
         let dir = root.join(TEMPLATES_FOLDER);
         seed_templates(&root).unwrap();
-        for (name, _) in DEFAULT_TEMPLATES {
-            assert!(dir.join(format!("{}.md", name)).exists(), "{} missing", name);
+        for (name, _) in DEFAULT_TEMPLATES.iter().chain(MERMAID_TEMPLATES) {
+            assert!(dir.join(template_file(name)).exists(), "{} missing", name);
         }
+        assert!(dir.join("Architecture.mmd").exists());
         fs::remove_file(dir.join("Meeting.md")).unwrap();
         fs::write(dir.join("Todo.md"), "my own todo").unwrap();
         seed_templates(&root).unwrap();

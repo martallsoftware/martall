@@ -91,11 +91,20 @@ export default function InputDialog({
               >
                 <option value="">Blank</option>
                 <option value={DRAWING_TEMPLATE}>✏️ Excalidraw drawing</option>
-                {templates.length > 0 && (
+                {templates.some((t) => !t.endsWith(".mmd")) && (
                   <optgroup label="Templates">
-                    {templates.map((t) => (
+                    {templates.filter((t) => !t.endsWith(".mmd")).map((t) => (
                       <option key={t} value={t}>
                         {t}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {templates.some((t) => t.endsWith(".mmd")) && (
+                  <optgroup label="Mermaid (.mmd)">
+                    {templates.filter((t) => t.endsWith(".mmd")).map((t) => (
+                      <option key={t} value={t}>
+                        ⇄ {t.replace(/\.mmd$/, "")}
                       </option>
                     ))}
                   </optgroup>
