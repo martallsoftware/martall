@@ -825,6 +825,21 @@ fn cleanup_orphaned_assets(assets_dir: &Path, notes_dir: &Path, exclude_note: &P
     }
 }
 
+/// Write an exported file (drawing JSON, SVG, or PNG) to a path the user chose
+/// in a save dialog. `base64` marks binary content sent as base64 text.
+#[tauri::command]
+fn write_export_file(path: String, contents: String, base64: Option<bool>) -> Result<(), String> {
+    use base64::Engine as _;
+    let bytes = if base64.unwrap_or(false) {
+        base64::engine::general_purpose::STANDARD
+            .decode(contents.as_bytes())
+            .map_err(|e| format!("Invalid image data: {}", e))?
+    } else {
+        contents.into_bytes()
+    };
+    fs::write(&path, bytes).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn copy_image_to_assets(source_path: String, note_path: String) -> Result<String, String> {
     let source = Path::new(&source_path);
@@ -1570,6 +1585,7 @@ pub fn run() {
             create_folder,
             create_note,
             create_drawing,
+            write_export_file,
             list_templates,
             template_questions,
             rename_node,
@@ -1611,6 +1627,26 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    #[test]
+    fn writes_text_and_base64_exports() {
+        let dir = std::env::temp_dir().join(format!("martall-export-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let svg = dir.join("a.svg");
+        write_export_file(svg.to_string_lossy().into(), "<svg/>".into(), None).unwrap();
+        assert_eq!(fs::read_to_string(&svg).unwrap(), "<svg/>");
+        let png = dir.join("a.png");
+        // "iVBORw0KGgo=" is the 8-byte PNG signature.
+        write_export_file(png.to_string_lossy().into(), "iVBORw0KGgo=".into(), Some(true)).unwrap();
+        assert_eq!(fs::read(&png).unwrap(), b"\x89PNG\r\n\x1a\n");
+        assert!(write_export_file(png.to_string_lossy().into(), "%%%".into(), Some(true)).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 #[cfg(test)]

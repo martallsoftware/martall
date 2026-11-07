@@ -101,8 +101,3 @@
    unset field doesn't look like it already has today's date. */
 input[type="date"].date-empty::-webkit-datetime-edit { color: transparent; }
 input[type="date"].date-empty:focus::-webkit-datetime-edit { color: inherit; }
-
-/* Drawing page: no "Browse libraries" (it would navigate the app window away). */
-.martall-drawing .library-menu-browse-button {
-  display: none;
-}
