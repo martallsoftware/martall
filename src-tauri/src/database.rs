@@ -386,6 +386,69 @@ pub fn index_text(path: &Path, content: &str) -> String {
         .unwrap_or_default()
 }
 
+/// What kind of note a file is, for its icon in the tree. Checked in order:
+/// folder (Templates/, Daily/), then content markers.
+pub fn note_kind(rel_path: &str, content: &str) -> &'static str {
+    let rp = rel_path.replace('\\', "/");
+    if rp.to_lowercase().ends_with(&format!(".{}", DRAWING_EXT)) {
+        return "drawing";
+    }
+    if rp.starts_with("Templates/") {
+        return "template";
+    }
+    if rp.starts_with(&format!("{}/", DAILY_FOLDER)) {
+        return "daily";
+    }
+    let has_tag = |tag: &str| {
+        content.split(|c: char| c.is_whitespace() || c == ',').any(|w| w.eq_ignore_ascii_case(tag))
+    };
+    if has_tag("#routine") {
+        return "routine";
+    }
+    if has_tag("#metrics") {
+        return "metrics";
+    }
+    if is_dashboard(content) {
+        return "dashboard";
+    }
+    if content.contains("```lua-live") {
+        return "script";
+    }
+    static TASK_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let task_re = TASK_RE.get_or_init(|| Regex::new(r"(?m)^\s*(?:[-*+]|\d+[.)])\s+\[[ xX/-]\]\s").unwrap());
+    if task_re.is_match(content) {
+        return "tasks";
+    }
+    if content.contains("```mermaid") {
+        return "diagram";
+    }
+    "note"
+}
+
+/// `dashboard: true` in the frontmatter (same rule as the dashboard view).
+fn is_dashboard(content: &str) -> bool {
+    let Some(rest) = content.strip_prefix("---") else { return false };
+    let end = rest.find("\n---").unwrap_or(0);
+    rest[..end].lines().any(|l| {
+        let mut kv = l.splitn(2, ':');
+        kv.next().map(str::trim) == Some("dashboard") && kv.next().map(|v| v.trim().trim_matches('"')) == Some("true")
+    })
+}
+
+/// Kind of every indexed note, keyed by relative path.
+pub fn note_kinds(conn: &Connection) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT rel_path, content FROM notes") {
+        if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
+            for (rp, content) in rows.flatten() {
+                let kind = note_kind(&rp, &content).to_string();
+                map.insert(rp, kind);
+            }
+        }
+    }
+    map
+}
+
 /// Full sync: scan all notes and drawings, index new/changed, remove deleted
 pub fn sync_index(conn: &Connection, notes_dir: &str) {
     let root = Path::new(notes_dir);
@@ -1167,6 +1230,25 @@ pub fn get_note_tags(conn: &Connection, notes_dir: &str, note_path: &str) -> Vec
         .unwrap()
         .filter_map(|r| r.ok())
         .collect()
+}
+
+#[cfg(test)]
+mod kind_tests {
+    use super::*;
+
+    #[test]
+    fn detects_note_kinds() {
+        assert_eq!(note_kind("a/x.excalidraw", ""), "drawing");
+        assert_eq!(note_kind("Templates/Todo.md", "- [ ] x #routine"), "template");
+        assert_eq!(note_kind("Daily/2026-11-07.md", "- [ ] x"), "daily");
+        assert_eq!(note_kind("Gym.md", "# Legs\n#routine\n- [ ] Squat"), "routine");
+        assert_eq!(note_kind("Body.md", "#metrics"), "metrics");
+        assert_eq!(note_kind("D.md", "---\ndashboard: true\n---\n"), "dashboard");
+        assert_eq!(note_kind("S.md", "```lua-live\nx\n```"), "script");
+        assert_eq!(note_kind("T.md", "text\n  - [x] done\n"), "tasks");
+        assert_eq!(note_kind("M.md", "```mermaid\nflowchart LR\n```"), "diagram");
+        assert_eq!(note_kind("N.md", "plain #routines text"), "note");
+    }
 }
 
 #[cfg(test)]

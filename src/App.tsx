@@ -23,9 +23,10 @@ import QuickSwitcher from "./components/QuickSwitcher";
 import CalendarPanel from "./components/CalendarPanel";
 import TasksPanel from "./components/TasksPanel";
 import type { TreeNode } from "./types";
-import { drawingMeta, isDrawingPath, linkDrawingInNote, mermaidKey, mermaidToElements, sceneJson, withDrawingMeta } from "./utils/drawing";
+import { DRAWING_TEMPLATE, drawingMeta, isDrawingPath, linkDrawingInNote, mermaidKey, mermaidToElements, sceneJson, withDrawingMeta } from "./utils/drawing";
 import {
   addToUserLibrary,
+  createDrawingUnique,
   importExcalidrawFiles,
   INSERT_SCENE_EVENT,
   isDrawingImportPath,
@@ -62,6 +63,7 @@ export default function App() {
   const { tags, activeTag, selectTag, tagResults, refreshTags } = useTags();
   const { note, saving, openNote, updateContent, closeNote } = useNote(() => {
     refreshTags();
+    refreshTree(); // a note's type (icon) can change when it is edited
     setTasksRefreshKey((k) => k + 1);
   });
   const { createFolder, createNote, renameNode, deleteNode, moveNode } =
@@ -471,25 +473,24 @@ export default function App() {
 
   const handleCreateNote = useCallback(
     async (parentDir: string, name: string, template?: string, answers?: Record<string, string>) => {
+      // "✏️ Excalidraw drawing" in the template list: a drawing, not a note.
+      if (template === DRAWING_TEMPLATE) {
+        const path = await createDrawingUnique(parentDir, name.replace(/\.(md|excalidraw)$/i, ""), sceneJson());
+        await refreshTree();
+        await handleSelectNote(path);
+        return;
+      }
       const newPath = await createNote(parentDir, name, template, answers);
       await openNote(newPath);
       refreshTags();
     },
-    [createNote, openNote, refreshTags],
+    [createNote, openNote, refreshTags, refreshTree, handleSelectNote],
   );
 
   /** Create `<name>.excalidraw` (adding " 2", " 3"… if taken) and open it. */
   const handleCreateDrawing = useCallback(
     async (parentDir: string, name: string, content = sceneJson()) => {
-      let path: string | null = null;
-      for (let i = 1; path === null; i++) {
-        const candidate = i === 1 ? name : `${name} ${i}`;
-        try {
-          path = await invoke<string>("create_drawing", { parentDir, name: candidate, content });
-        } catch (err) {
-          if (i > 50 || !String(err).includes("already exists")) throw err;
-        }
-      }
+      const path = await createDrawingUnique(parentDir, name, content);
       await refreshTree();
       await handleSelectNote(path);
       return path;
@@ -798,6 +799,10 @@ ${previewEl.innerHTML}
               onSelectNote={handleSelectNote}
               onCreateNote={handleCreateNote}
               reveal={treeReveal}
+              onSetWeights={async (updates) => {
+                await invoke("set_weights", { updates });
+                await refreshTree();
+              }}
               onCreateDrawing={async (dir, name) => { await handleCreateDrawing(dir, name); }}
               onCreateFolder={createFolder}
               onRename={handleRename}

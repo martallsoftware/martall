@@ -5,6 +5,9 @@
 
 export const DRAWING_EXT = ".excalidraw";
 
+/** Choice in the New Note template list that creates a drawing instead of a note. */
+export const DRAWING_TEMPLATE = "__excalidraw__";
+
 export function isDrawingPath(path: string | null | undefined): boolean {
   return !!path && path.toLowerCase().endsWith(DRAWING_EXT);
 }

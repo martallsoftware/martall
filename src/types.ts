@@ -3,6 +3,10 @@ export interface TreeNode {
   path: string;
   is_folder: boolean;
   children: TreeNode[];
+  /** Note type for the icon: note, tasks, daily, template, routine, metrics, dashboard, script, diagram, drawing. */
+  kind?: string;
+  /** > 0: pinned to the top of its folder (higher first). */
+  weight?: number;
 }
 
 export interface NoteContent {

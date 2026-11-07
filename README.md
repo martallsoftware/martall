@@ -136,7 +136,9 @@ shapes, text, freehand pen, images and frames. Each drawing is saved in the
 vault as `Name.excalidraw` (plain JSON, the same format excalidraw.com and the
 Obsidian Excalidraw plugin use).
 
-- **New:** right-click in the tree → **New Drawing**.
+- **New:** right-click in the tree → **New Drawing**, or pick
+  **✏️ Excalidraw drawing** in the *Template* list of any **New Note** dialog
+  (+ button, Home panel, tree menu).
 - **Library** (top right) has extra shapes in the four diagram colours
   (green = ready, amber dashed = to do, grey dashed = external, blue = records):
   process, database, storage (striped cylinder), queue / log (horizontal
@@ -186,6 +188,18 @@ Obsidian Excalidraw plugin use).
   sharp at up to 3×; made in the app, nothing extra to install). Images
   use the canvas background and the current light/dark theme. *Export
   image…* below it copies a PNG to the clipboard.
+
+### Tree: note types and pinning
+- **Icons by note type:** drawing (✏️ green), daily note (calendar, in
+  `Daily/`), template (in `Templates/`), routine (`#routine`), metrics
+  (`#metrics`), dashboard (`dashboard: true`), script (`lua-live`), tasks (has
+  `- [ ]` items), note with a Mermaid diagram, and plain note. Hover an icon to
+  see its type; it updates when you save.
+- **Pin to top (weights):** right-click a note or folder → **📌 Pin to top**,
+  then **↑ Move up** / **↓ Move down** to order pinned items, or **Unpin**.
+  Pinned items come first in their folder, with a small pin. The order is
+  stored in the vault in `.martall/weights.json` (syncs with the vault,
+  survives *Refresh*), and follows renames, moves and deletes.
 
 ### UI
 - **Movable split divider** between editor and preview. Drag to resize,

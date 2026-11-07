@@ -57,6 +57,12 @@ pub struct TreeNode {
     pub path: String,
     pub is_folder: bool,
     pub children: Vec<TreeNode>,
+    /// Note type for the tree icon ("note", "tasks", "daily", "drawing", …); empty for folders.
+    #[serde(default)]
+    pub kind: String,
+    /// Pin weight: > 0 is pinned to the top of its folder, higher first.
+    #[serde(default)]
+    pub weight: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,7 +84,19 @@ pub struct AppState {
 // Helper: build tree recursively
 // ---------------------------------------------------------------------------
 
-fn build_tree(dir: &Path) -> Vec<TreeNode> {
+/// Data the tree needs besides the file system: note kinds and pin weights,
+/// both keyed by path relative to the vault root.
+struct TreeCtx<'a> {
+    root: &'a Path,
+    kinds: std::collections::HashMap<String, String>,
+    weights: std::collections::HashMap<String, i64>,
+}
+
+fn rel_key(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
+}
+
+fn build_tree(dir: &Path, ctx: &TreeCtx) -> Vec<TreeNode> {
     let mut folders: Vec<TreeNode> = Vec::new();
     let mut files: Vec<TreeNode> = Vec::new();
 
@@ -96,30 +114,106 @@ fn build_tree(dir: &Path) -> Vec<TreeNode> {
             continue;
         }
 
+        let key = rel_key(ctx.root, &path);
+        let weight = ctx.weights.get(&key).copied().unwrap_or(0);
         if path.is_dir() {
-            let children = build_tree(&path);
+            let children = build_tree(&path, ctx);
             folders.push(TreeNode {
                 name,
                 path: path.to_string_lossy().to_string(),
                 is_folder: true,
                 children,
+                kind: String::new(),
+                weight,
             });
         } else if database::is_indexable(&path) {
             let display_name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            // Not indexed yet (just created elsewhere): work out the kind from the path alone.
+            let kind = ctx.kinds.get(&key).cloned().unwrap_or_else(|| database::note_kind(&key, "").to_string());
             files.push(TreeNode {
                 name: display_name,
                 path: path.to_string_lossy().to_string(),
                 is_folder: false,
                 children: Vec::new(),
+                kind,
+                weight,
             });
         }
     }
 
-    folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    // Pinned (weight > 0) first, highest weight on top; then by name.
+    let order = |a: &TreeNode, b: &TreeNode| {
+        b.weight.cmp(&a.weight).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    };
+    folders.sort_by(order);
+    files.sort_by(order);
 
     folders.extend(files);
     folders
+}
+
+// ---------------------------------------------------------------------------
+// Pin weights: <vault>/.martall/weights.json, { "Folder/Note.md": 3, … }
+// Kept in the vault (not the index) so it syncs and survives a rebuild.
+// ---------------------------------------------------------------------------
+
+fn weights_path(root: &Path) -> PathBuf {
+    root.join(".martall").join("weights.json")
+}
+
+fn load_weights(root: &Path) -> std::collections::HashMap<String, i64> {
+    fs::read_to_string(weights_path(root))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_weights(root: &Path, weights: &std::collections::HashMap<String, i64>) -> Result<(), String> {
+    let path = weights_path(root);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(weights).map_err(|e| e.to_string())?;
+    fs::write(path, json).map_err(|e| e.to_string())
+}
+
+/// After a rename/move (`new` = Some) or delete (`new` = None) of `old`
+/// (a file or folder, relative keys), move or drop the weights under it.
+fn rekey_weights(root: &Path, old: &str, new: Option<&str>) {
+    let mut weights = load_weights(root);
+    let prefix = format!("{}/", old);
+    let affected: Vec<String> = weights
+        .keys()
+        .filter(|k| k.as_str() == old || k.starts_with(&prefix))
+        .cloned()
+        .collect();
+    if affected.is_empty() {
+        return;
+    }
+    for k in affected {
+        let w = weights.remove(&k).unwrap_or(0);
+        if let Some(new) = new {
+            weights.insert(format!("{}{}", new, &k[old.len()..]), w);
+        }
+    }
+    let _ = save_weights(root, &weights);
+}
+
+/// Set pin weights for absolute paths; 0 unpins.
+#[tauri::command]
+fn set_weights(state: State<'_, AppState>, updates: std::collections::HashMap<String, i64>) -> Result<(), String> {
+    let settings = state.settings.lock().unwrap();
+    let root = Path::new(&settings.notes_directory);
+    let mut weights = load_weights(root);
+    for (path, w) in updates {
+        let key = rel_key(root, Path::new(&path));
+        if w > 0 {
+            weights.insert(key, w);
+        } else {
+            weights.remove(&key);
+        }
+    }
+    save_weights(root, &weights)
 }
 
 // ---------------------------------------------------------------------------
@@ -259,7 +353,9 @@ fn read_tree(state: State<'_, AppState>) -> Vec<TreeNode> {
     let settings = state.settings.lock().unwrap();
     let root = Path::new(&settings.notes_directory);
     let _ = fs::create_dir_all(root);
-    build_tree(root)
+    let kinds = database::note_kinds(&state.db.lock().unwrap());
+    let ctx = TreeCtx { root, kinds, weights: load_weights(root) };
+    build_tree(root, &ctx)
 }
 
 #[tauri::command]
@@ -675,6 +771,7 @@ fn rename_node(state: State<'_, AppState>, old_path: String, new_name: String) -
         let new_title = new_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
         database::rename_note_index(&db, &old_rp.to_string_lossy(), &new_rp.to_string_lossy(), &new_title);
     }
+    rekey_weights(root, &rel_key(root, old), Some(&rel_key(root, &new_path)));
 
     Ok(new_path.to_string_lossy().to_string())
 }
@@ -684,6 +781,7 @@ fn delete_node(state: State<'_, AppState>, path: String) -> Result<(), String> {
     let p = Path::new(&path);
     let settings = state.settings.lock().unwrap();
     let root = Path::new(&settings.notes_directory);
+    rekey_weights(root, &rel_key(root, p), None);
 
     if p.is_dir() {
         // Delete folder index entries
@@ -732,6 +830,7 @@ fn move_node(state: State<'_, AppState>, source: String, dest_dir: String) -> Re
         let db = state.db.lock().unwrap();
         database::move_note_index(&db, &old_rp.to_string_lossy(), &new_rp.to_string_lossy());
     }
+    rekey_weights(root, &rel_key(root, src), Some(&rel_key(root, &dest)));
 
     fs::rename(src, &dest).map_err(|e| e.to_string())?;
     Ok(dest.to_string_lossy().to_string())
@@ -1585,6 +1684,7 @@ pub fn run() {
             create_folder,
             create_note,
             create_drawing,
+            set_weights,
             write_export_file,
             list_templates,
             template_questions,
@@ -1627,6 +1727,35 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod weight_tests {
+    use super::*;
+
+    #[test]
+    fn pinned_first_and_rekeyed_on_move() {
+        let root = std::env::temp_dir().join(format!("martall-weights-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("Proj")).unwrap();
+        for f in ["Proj/a.md", "Proj/b.md", "Proj/c.md"] {
+            fs::write(root.join(f), "x").unwrap();
+        }
+        let mut w = std::collections::HashMap::new();
+        w.insert("Proj/c.md".to_string(), 1);
+        w.insert("Proj/b.md".to_string(), 2);
+        save_weights(&root, &w).unwrap();
+        let names = |root: &Path| -> Vec<String> {
+            let ctx = TreeCtx { root, kinds: Default::default(), weights: load_weights(root) };
+            build_tree(&root.join("Proj"), &ctx).into_iter().map(|n| format!("{}:{}", n.name, n.weight)).collect()
+        };
+        assert_eq!(names(&root), vec!["b:2", "c:1", "a:0"]);
+        rekey_weights(&root, "Proj", Some("Work/Proj"));
+        assert_eq!(load_weights(&root).get("Work/Proj/b.md"), Some(&2));
+        rekey_weights(&root, "Work/Proj/b.md", None);
+        assert_eq!(load_weights(&root).len(), 1);
+        fs::remove_dir_all(&root).unwrap();
+    }
 }
 
 #[cfg(test)]

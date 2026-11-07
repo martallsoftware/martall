@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { DRAWING_TEMPLATE } from "../utils/drawing";
 
 interface Props {
   title: string;
@@ -39,7 +40,7 @@ export default function InputDialog({
   useEffect(() => {
     setQuestions([]);
     setAnswers({});
-    if (!template) return;
+    if (!template || template === DRAWING_TEMPLATE) return;
     let cancelled = false;
     invoke<string[]>("template_questions", { name: template })
       .then((q) => { if (!cancelled) setQuestions(q); })
@@ -76,7 +77,7 @@ export default function InputDialog({
             placeholder={placeholder}
             className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-[#16162a] focus:outline-none focus:ring-2 focus:ring-accent/50"
           />
-          {withTemplates && templates.length > 0 && (
+          {withTemplates && (
             <label className="block mt-3 text-xs text-gray-500 dark:text-gray-400">
               Template
               <select
@@ -89,11 +90,16 @@ export default function InputDialog({
                 className="mt-1 w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-[#16162a] text-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-accent/50"
               >
                 <option value="">Blank</option>
-                {templates.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
+                <option value={DRAWING_TEMPLATE}>✏️ Excalidraw drawing</option>
+                {templates.length > 0 && (
+                  <optgroup label="Templates">
+                    {templates.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
             </label>
           )}
