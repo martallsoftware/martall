@@ -36,6 +36,83 @@ function countNotes(node: TreeNode): number {
   return count;
 }
 
+/** Icon and tint per note kind (see `note_kind` in database.rs). */
+const KIND_ICONS: Record<string, { title: string; cls: string; paths: React.ReactNode }> = {
+  note: {
+    title: "Note",
+    cls: "",
+    paths: <><rect x="3" y="1.5" width="10" height="13" rx="1.5" /><path d="M6 5h4M6 8h4M6 11h2" /></>,
+  },
+  tasks: {
+    title: "Tasks",
+    cls: "text-emerald-500/80",
+    paths: <><rect x="2.5" y="2.5" width="11" height="11" rx="2" /><path d="M5.5 8l2 2 3.5-4" /></>,
+  },
+  daily: {
+    title: "Daily note",
+    cls: "text-sky-500/80",
+    paths: <><rect x="2" y="3" width="12" height="11" rx="1.5" /><path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3" /><path d="M5 9.5h2" /></>,
+  },
+  template: {
+    title: "Template",
+    cls: "text-violet-400",
+    paths: <><path d="M3 1.5h7l3 3v10H3z" strokeDasharray="2 1.5" /><path d="M6 8h4M8 6v4" /></>,
+  },
+  routine: {
+    title: "Routine (#routine)",
+    cls: "text-orange-400",
+    paths: <><path d="M3 7a5 5 0 0 1 8.5-3.5L13 5" /><path d="M13 2v3h-3" /><path d="M13 9a5 5 0 0 1-8.5 3.5L3 11" /><path d="M3 14v-3h3" /></>,
+  },
+  metrics: {
+    title: "Metrics (#metrics)",
+    cls: "text-pink-400",
+    paths: <><path d="M2 13.5h12" /><path d="M3 11l3-4 3 2 4-5.5" /></>,
+  },
+  dashboard: {
+    title: "Dashboard",
+    cls: "text-indigo-400",
+    paths: <><rect x="2" y="2" width="5" height="6" rx="1" /><rect x="9" y="2" width="5" height="3.5" rx="1" /><rect x="2" y="10" width="5" height="4" rx="1" /><rect x="9" y="7.5" width="5" height="6.5" rx="1" /></>,
+  },
+  script: {
+    title: "Script (lua-live)",
+    cls: "text-amber-400",
+    paths: <><path d="M5.5 4.5L2 8l3.5 3.5M10.5 4.5L14 8l-3.5 3.5" /><path d="M9 3l-2 10" /></>,
+  },
+  diagram: {
+    title: "Note with Mermaid diagram",
+    cls: "text-teal-400",
+    paths: <><rect x="1.5" y="2" width="5" height="3.5" rx="0.5" /><rect x="9.5" y="10.5" width="5" height="3.5" rx="0.5" /><path d="M4 5.5v4.5a2 2 0 0 0 2 2h3.5" /></>,
+  },
+  drawing: {
+    title: "Excalidraw drawing",
+    cls: "text-accent",
+    paths: <><rect x="1.5" y="2.5" width="5" height="4" rx="0.5" /><circle cx="11.5" cy="11.5" r="2.5" /><path d="M6.5 4.5h3a2 2 0 0 1 2 2V9" /><path d="M2 14l3-3" /></>,
+  },
+};
+
+function NoteIcon({ node }: { node: TreeNode }) {
+  const kind = node.path.toLowerCase().endsWith(".excalidraw") ? "drawing" : node.kind || "note";
+  const icon = KIND_ICONS[kind] ?? KIND_ICONS.note;
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" className={icon.cls}>
+      <title>{icon.title}</title>
+      {icon.paths}
+    </svg>
+  );
+}
+
+/** The list a node sits in (its parent's children, or the top level). */
+function siblingsOf(nodes: TreeNode[], path: string): TreeNode[] | null {
+  if (nodes.some((n) => n.path === path)) return nodes;
+  for (const n of nodes) {
+    if (n.is_folder) {
+      const found = siblingsOf(n.children, path);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 interface Props {
   nodes: TreeNode[];
   selectedPath: string | null;
@@ -48,6 +125,8 @@ interface Props {
   ) => Promise<void>;
   onCreateFolder: (path: string) => Promise<void>;
   onCreateDrawing: (parentDir: string, name: string) => Promise<void>;
+  /** Save pin weights (absolute path → weight, 0 = unpin) and refresh the tree. */
+  onSetWeights: (updates: Record<string, number>) => Promise<void>;
   onRename: (path: string, newName: string) => Promise<void>;
   onDelete: (path: string) => Promise<void>;
   onMove: (source: string, destDir: string) => Promise<void>;
@@ -137,18 +216,8 @@ function TreeNodeItem({
                 <path d="M2 4h5l1.5 2H14v7H2V4z" />
               )}
             </svg>
-          ) : node.path.toLowerCase().endsWith(".excalidraw") ? (
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" className="text-accent">
-              <rect x="1.5" y="2.5" width="5" height="4" rx="0.5" />
-              <circle cx="11.5" cy="11.5" r="2.5" />
-              <path d="M6.5 4.5h3a2 2 0 0 1 2 2V9" />
-              <path d="M2 14l3-3" />
-            </svg>
           ) : (
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="3" y="1.5" width="10" height="13" rx="1.5" />
-              <path d="M6 5h4M6 8h4M6 11h2" />
-            </svg>
+            <NoteIcon node={node} />
           )}
         </span>
 
@@ -167,6 +236,15 @@ function TreeNodeItem({
           />
         ) : (
           <span className="truncate flex-1 min-w-0">{node.name}</span>
+        )}
+
+        {/* Pinned to the top of its folder */}
+        {(node.weight ?? 0) > 0 && !isRenaming && (
+          <span className="flex-shrink-0 text-accent/70" title="Pinned to top (right-click to move or unpin)">
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M9.5 1.5l5 5-2 .5-2.5 2.5.5 3.5-1.5 1.5-3-3-4 4-.5-.5 4-4-3-3L4 6l3.5.5L10 4z" />
+            </svg>
+          </span>
         )}
 
         {/* Note count badge for folders */}
@@ -222,6 +300,7 @@ export default function TreeView({
   onCreateNote,
   onCreateFolder,
   onCreateDrawing,
+  onSetWeights,
   onRename,
   onDelete,
   onMove,
@@ -313,6 +392,49 @@ export default function TreeView({
     setRenamingPath(null);
     setRenameValue("");
   }, []);
+
+  /** Pin / move / unpin items for a node, among siblings of the same kind (folder or file). */
+  const pinMenuItems = useCallback(
+    (node: TreeNode): MenuItem[] => {
+      const group = (siblingsOf(nodes, node.path) ?? []).filter((n) => n.is_folder === node.is_folder);
+      const pinned = group.filter((n) => (n.weight ?? 0) > 0); // already sorted, highest first
+      const idx = pinned.findIndex((n) => n.path === node.path);
+      // Rewrite the whole pinned list as n..1 so weights stay small and tidy.
+      const save = (order: TreeNode[]) =>
+        onSetWeights(Object.fromEntries(order.map((n, i) => [n.path, order.length - i])));
+      if (idx === -1) {
+        return [{ label: "📌 Pin to top", onClick: () => save([node, ...pinned]) }];
+      }
+      const items: MenuItem[] = [];
+      if (idx > 0) {
+        items.push({
+          label: "↑ Move up",
+          onClick: () => {
+            const order = [...pinned];
+            [order[idx - 1], order[idx]] = [order[idx], order[idx - 1]];
+            save(order);
+          },
+        });
+      }
+      if (idx < pinned.length - 1) {
+        items.push({
+          label: "↓ Move down",
+          onClick: () => {
+            const order = [...pinned];
+            [order[idx + 1], order[idx]] = [order[idx], order[idx + 1]];
+            save(order);
+          },
+        });
+      }
+      items.push({
+        label: "Unpin",
+        onClick: () =>
+          onSetWeights({ [node.path]: 0, ...Object.fromEntries(pinned.filter((n) => n.path !== node.path).map((n, i, a) => [n.path, a.length - i])) }),
+      });
+      return items;
+    },
+    [nodes, onSetWeights],
+  );
 
   const getContextMenuItems = useCallback((): MenuItem[] => {
     const node = contextMenu?.node;
@@ -417,6 +539,7 @@ export default function TreeView({
             });
           },
         },
+        ...pinMenuItems(node),
         {
           label: "Rename",
           onClick: () => startRename(node.path, node.name),
@@ -455,6 +578,7 @@ export default function TreeView({
 
     // Note (file)
     return [
+      ...pinMenuItems(node),
       {
         label: "Rename",
         onClick: () => startRename(node.path, node.name),
@@ -489,7 +613,7 @@ export default function TreeView({
         },
       },
     ];
-  }, [contextMenu, rootDir, onCreateNote, onCreateFolder, onCreateDrawing, onDelete, startRename]);
+  }, [contextMenu, rootDir, onCreateNote, onCreateFolder, onCreateDrawing, onDelete, startRename, pinMenuItems]);
 
   // Build folder list for move dialog, excluding the source's own subtree
   const getMoveTargetFolders = useCallback(
