@@ -101,3 +101,11 @@
    unset field doesn't look like it already has today's date. */
 input[type="date"].date-empty::-webkit-datetime-edit { color: transparent; }
 input[type="date"].date-empty:focus::-webkit-datetime-edit { color: inherit; }
+
+/* Sized .mmd embeds (![[Name|300]]): the diagram scales to the given box. */
+.martall-sized-embed svg {
+  width: 100% !important;
+  max-width: 100% !important;
+  height: auto;
+  max-height: var(--embed-max-h, none);
+}
