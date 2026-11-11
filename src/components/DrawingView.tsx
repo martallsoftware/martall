@@ -5,6 +5,7 @@ import {
   exportToBlob,
   exportToCanvas,
   exportToSvg,
+  Footer,
   MainMenu,
   getCommonBounds,
   convertToExcalidrawElements,
@@ -22,7 +23,7 @@ import LaserOverlay from "./LaserOverlay";
 import "@excalidraw/excalidraw/index.css";
 import { drawingMeta, parseScene, withDrawingMeta } from "../utils/drawing";
 import { bytesToBase64, canvasesToPdf, canvasToPdf } from "../utils/pdf";
-import { pageElements, pageFrames, pageTitle } from "../utils/pages";
+import { isPathCandidate, markedPath, pageElements, pageFrames, pageTitle, pathStops } from "../utils/pages";
 import { builtinLibrary, DEFAULT_APP_STATE, mermaidToElements } from "../utils/drawingShapes";
 import {
   addToUserLibrary,
@@ -152,6 +153,8 @@ export default function DrawingView({ name, content, darkMode, onChange, obsidia
   const lastKey = useRef<string | null>(null);
   // Pages = frames; keep the list in state for the Pages panel.
   const [pages, setPages] = useState<any[]>([]);
+  const presentingRef = useRef(false);
+  const [hasPath, setHasPath] = useState(false);
   const pagesSig = useRef("");
   const handleChange = useCallback(
     (elements: readonly any[], appState: any, files: any) => {
@@ -161,6 +164,10 @@ export default function DrawingView({ name, content, darkMode, onChange, obsidia
         pagesSig.current = sig;
         setPages(frames);
       }
+      setHasPath(!!markedPath(elements));
+      // While presenting nothing is edited; the path line is only hidden for
+      // the show, so don't write that. (Saved normally again after Exit.)
+      if (presentingRef.current) return;
       const key = `${getSceneVersion(elements)}|${Object.keys(files).length}|${appState.viewBackgroundColor}|${appState.gridSize}`;
       if (lastKey.current === null) {
         lastKey.current = key; // first call is the initial load
@@ -213,11 +220,16 @@ export default function DrawingView({ name, content, darkMode, onChange, obsidia
   const [fullscreen, setFullscreen] = useState(false);
   const savedFrameRendering = useRef<any>(null);
 
+  // Path stops get room around them and a zoom cap, so a small shape isn't
+  // blown up to fill the screen; frames (slides) fill it.
+  const pathMode = useRef(false);
   const showSlide = useCallback((frames: any[], i: number) => {
     const api = apiRef.current;
     if (!api) return;
     // fitToViewport (unlike fitToContent) also zooms in past 100%, so a slide fills the screen.
-    const fit = { fitToViewport: true, viewportZoomFactor: 0.92, animate: true, duration: 350 } as const;
+    const fit = pathMode.current
+      ? ({ fitToViewport: true, viewportZoomFactor: 0.6, maxZoom: 3, animate: true, duration: 450 } as const)
+      : ({ fitToViewport: true, viewportZoomFactor: 0.92, animate: true, duration: 350 } as const);
     if (frames.length === 0) {
       api.scrollToContent(undefined, fit);
       return;
@@ -267,17 +279,55 @@ export default function DrawingView({ name, content, darkMode, onChange, obsidia
     }
   }, []);
 
+  const hiddenPath = useRef<{ id: string; opacity: number } | null>(null);
+
   const startPresenting = useCallback(() => {
     const api = apiRef.current;
     if (!api) return;
-    const frames = slideFrames(api.getSceneElements());
-    setSlides(frames);
+    let elements = api.getSceneElements() as any[];
+
+    // A selected line/arrow becomes the presentation path (remembered in the file).
+    const sel = Object.entries(api.getAppState().selectedElementIds).filter(([, v]) => v).map(([k]) => k);
+    const picked = sel.length === 1 ? elements.find((e) => e.id === sel[0] && isPathCandidate(e)) : null;
+    if (picked) {
+      api.updateScene({
+        elements: api.getSceneElementsIncludingDeleted().map((e: any) =>
+          e.id === picked.id
+            ? newElementWith(e, { customData: { ...e.customData, presentationPath: true } } as any)
+            : e.customData?.presentationPath
+              ? newElementWith(e, { customData: { ...e.customData, presentationPath: false } } as any)
+              : e,
+        ),
+        appState: { selectedElementIds: {} },
+        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+      });
+      elements = api.getSceneElements() as any[];
+    }
+    const path = markedPath(elements);
+    const frames = slideFrames(elements);
+    // Path stops win over frames; each slide is one or more elements to fit.
+    const slidesNow: any[] = path ? pathStops(path, elements) : frames;
+    pathMode.current = !!path;
+    setSlides(slidesNow);
+    presentingRef.current = true;
+    if (path) {
+      hiddenPath.current = { id: path.id, opacity: path.opacity };
+      api.updateScene({
+        elements: api.getSceneElementsIncludingDeleted().map((e: any) =>
+          e.id === path.id ? newElementWith(e, { opacity: 0 } as any) : e,
+        ),
+      });
+    }
     // Frames act as slides: clip to them and hide their outlines and titles.
     savedFrameRendering.current = api.getAppState().frameRendering;
     api.updateScene({ appState: { frameRendering: { enabled: true, clip: true, name: false, outline: false } } });
     setPresenting(true);
     setNotice(
-      (frames.length ? `${frames.length} slides (frames) · ← → or Space to step\n` : "") +
+      (path
+        ? `Path: ${slidesNow.length} stops · ← → or Space to step\n`
+        : frames.length
+          ? `${frames.length} slides (frames) · ← → or Space to step\n`
+          : "Tip: select a line or arrow before ▶ Present to tour along it\n") +
         "L laser · H hand · F fit · Esc exit",
     );
     // Let view mode and the full-window layout apply (Excalidraw re-measures
@@ -287,7 +337,7 @@ export default function DrawingView({ name, content, darkMode, onChange, obsidia
       // The new size lands in state on the next render; frame after that.
       setTimeout(() => {
         choosePresentTool("laser");
-        showSlide(frames, 0);
+        showSlide(slidesNow, 0);
       }, 80);
     }, 60);
   }, [choosePresentTool, showSlide]);
@@ -297,6 +347,17 @@ export default function DrawingView({ name, content, darkMode, onChange, obsidia
     setPresenting(false);
     if (api) {
       if (savedFrameRendering.current) api.updateScene({ appState: { frameRendering: savedFrameRendering.current } });
+      // Show the path line again (before saving resumes, so it's never saved hidden).
+      const hidden = hiddenPath.current;
+      hiddenPath.current = null;
+      if (hidden) {
+        api.updateScene({
+          elements: api.getSceneElementsIncludingDeleted().map((e: any) =>
+            e.id === hidden.id ? newElementWith(e, { opacity: hidden.opacity } as any) : e,
+          ),
+        });
+      }
+      presentingRef.current = false;
       setTimeout(() => {
         remeasure(api);
         api.setActiveTool({ type: "selection" });
@@ -645,7 +706,7 @@ export default function DrawingView({ name, content, darkMode, onChange, obsidia
               <button
                 onClick={startPresenting}
                 className="whitespace-nowrap px-3 py-1.5 text-xs rounded-lg bg-accent text-white hover:bg-accent/90 transition-colors"
-                title="Read-only presentation with laser pointer; frames become slides"
+                title="Read-only presentation with laser pointer. Select a line or arrow first to tour along it; otherwise frames become slides"
               >
                 ▶ Present
               </button>
@@ -662,6 +723,24 @@ export default function DrawingView({ name, content, darkMode, onChange, obsidia
               <MainMenu.Item onSelect={() => setMermaidOpen(true)}>Import Mermaid…</MainMenu.Item>
               <MainMenu.Item onSelect={importFile}>Import file… (drawing or library)</MainMenu.Item>
               <MainMenu.Item onSelect={startPresenting}>▶ Present</MainMenu.Item>
+              {hasPath && (
+                <MainMenu.Item
+                  onSelect={() => {
+                    const api = apiRef.current;
+                    if (!api) return;
+                    api.updateScene({
+                      elements: api.getSceneElementsIncludingDeleted().map((e: any) =>
+                        e.customData?.presentationPath
+                          ? newElementWith(e, { customData: { ...e.customData, presentationPath: false } } as any)
+                          : e,
+                      ),
+                      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+                    });
+                  }}
+                >
+                  Stop using presentation path
+                </MainMenu.Item>
+              )}
             </>
           )}
           <MainMenu.Separator />
@@ -685,6 +764,27 @@ export default function DrawingView({ name, content, darkMode, onChange, obsidia
           <MainMenu.DefaultItems.ChangeCanvasBackground />
           <MainMenu.DefaultItems.Help />
         </MainMenu>
+        {!presenting && (
+          <Footer>
+            {/* Same "fit" as in Present: the whole drawing fills the window. */}
+            <button
+              onClick={() =>
+                apiRef.current?.scrollToContent(undefined, {
+                  fitToViewport: true,
+                  viewportZoomFactor: 0.9,
+                  animate: true,
+                  duration: 300,
+                })
+              }
+              className="ml-2 h-9 w-9 flex items-center justify-center rounded-lg text-[var(--icon-fill-color)] bg-[var(--island-bg-color)] [box-shadow:var(--shadow-island)] hover:bg-[var(--button-hover-bg)]"
+              title="Fit drawing to window"
+            >
+              <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                <path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4" />
+              </svg>
+            </button>
+          </Footer>
+        )}
       </Excalidraw>
 
       {pagesOpen && !presenting && (

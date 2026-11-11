@@ -195,6 +195,8 @@ Obsidian Excalidraw plugin use).
     the **Library** panel and are remembered. **Browse libraries** in the
     Library panel opens that site in your browser; click *Download* there and
     drop the file on the app.
+- **⛶ Fit** (bottom left, next to the zoom buttons) zooms so the whole
+  drawing fits the window.
 - **Pages:** one drawing can hold several pages. Each page is an Excalidraw
   *frame*, so the file still opens normally on excalidraw.com and in Obsidian
   (pages side by side on the canvas).
@@ -217,6 +219,13 @@ Obsidian Excalidraw plugin use).
     them, Home/End jump. Order is a leading number in the frame name
     ("1 Intro", "2 Flow"…), otherwise top-to-bottom, left-to-right. Frame
     borders and titles are hidden while presenting.
+  - **Presentation path:** draw a line or arrow through the drawing,
+    select it and press **▶ Present**. Each point (bend) of the line is a
+    stop: the view zooms to the smallest shape or frame under that point (or
+    to the shapes near it), with ← → / Space stepping along. The line is
+    hidden while presenting and remembered as the path; ☰ → *Stop using
+    presentation path* forgets it. Order of choice: path, then frames, then
+    the whole drawing.
   - **Full screen** button (macOS full screen); **Exit** or Esc leaves.
 - **Export:** ☰ → *Export* saves the drawing to a file you choose:
   *Excalidraw file* (`.excalidraw`, opens on excalidraw.com and in other
